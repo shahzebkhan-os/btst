@@ -1,0 +1,802 @@
+"""
+data_collector.py
+=================
+Primary data collection module for the F&O Neural Network Predictor.
+
+Data Sources (in priority order):
+  1. NSE F&O Bhavcopy CSV files      — historical OHLCV + OI for all F&O contracts
+  2. nsefin library                   — live option chain, Greeks, FII/DII, VIX
+  3. nsepython library                — PCR, participant OI, illiquid options check
+  4. yfinance                         — Nifty / BankNifty OHLCV, India VIX, USD-INR, global indices
+  5. NSE direct API (requests)        — fallback for option chain if nsefin unavailable
+
+Usage:
+    collector = DataCollector()
+    df = collector.get_full_dataset(start_date="2022-01-01", end_date="2024-12-31")
+"""
+
+import os
+import time
+import logging
+import warnings
+import datetime as dt
+from pathlib import Path
+from typing import Optional, List, Dict, Tuple
+
+import numpy as np
+import pandas as pd
+import yfinance as yf
+import requests
+
+warnings.filterwarnings("ignore")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("logs/data_collector.log", mode="a"),
+    ],
+)
+logger = logging.getLogger("DataCollector")
+
+# ── Try importing optional NSE libraries ──────────────────────────────────────
+try:
+    import nsefin
+    NSEFIN_AVAILABLE = True
+    logger.info("nsefin available ✓")
+except ImportError:
+    NSEFIN_AVAILABLE = False
+    logger.warning("nsefin not installed. Run: pip install nsefin")
+
+try:
+    from nsepython import nsefetch, pcr
+    NSEPYTHON_AVAILABLE = True
+    logger.info("nsepython available ✓")
+except ImportError:
+    NSEPYTHON_AVAILABLE = False
+    logger.warning("nsepython not installed. Run: pip install nsepython")
+
+# ── Constants ─────────────────────────────────────────────────────────────────
+NSE_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Accept": "application/json",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.nseindia.com/",
+}
+NSE_BASE = "https://www.nseindia.com/api"
+NIFTY_STRIKE_STEP = 50
+BANKNIFTY_STRIKE_STEP = 100
+ATM_RANGE_STRIKES = 10   # strikes above and below ATM to aggregate PCR/OI
+
+# ─────────────────────────────────────────────────────────────────────────────
+class DataCollector:
+    """
+    Master data collector — merges all sources into a single clean DataFrame
+    ready for feature engineering.
+    """
+
+    def __init__(
+        self,
+        bhavcopy_dir: str = "data/bhavcopy",
+        vix_file: str = "data/vix/india_vix.csv",
+        fii_file: str = "data/fii_dii/fii_dii_data.csv",
+    ):
+        self.bhavcopy_dir = Path(bhavcopy_dir)
+        self.vix_file = Path(vix_file)
+        self.fii_file = Path(fii_file)
+        self._nse_session: Optional[requests.Session] = None
+
+        if NSEFIN_AVAILABLE:
+            self.nse_client = nsefin.NSEClient()
+        else:
+            self.nse_client = None
+
+        # Create output dirs
+        for d in ["logs", "data/bhavcopy", "data/vix", "data/fii_dii",
+                  "output", "models"]:
+            Path(d).mkdir(parents=True, exist_ok=True)
+
+    # ─── NSE Session ──────────────────────────────────────────────────────────
+    def _get_nse_session(self) -> requests.Session:
+        """Create a warm NSE session (required to bypass NSE bot-check)."""
+        if self._nse_session is not None:
+            return self._nse_session
+        session = requests.Session()
+        session.headers.update(NSE_HEADERS)
+        session.get("https://www.nseindia.com", timeout=10)
+        time.sleep(1)
+        self._nse_session = session
+        logger.info("NSE session initialized")
+        return session
+
+    # ─── 1. F&O BHAVCOPY ──────────────────────────────────────────────────────
+    def load_bhavcopy_range(
+        self,
+        start_date: str,
+        end_date: str,
+        symbols: Optional[List[str]] = None,
+    ) -> pd.DataFrame:
+        """
+        Load NSE F&O Bhavcopy CSV files for a date range.
+
+        File naming convention:  fo{DDMMYYYY}bhav.csv
+        Download from:  https://www.nseindia.com/reports-archives-fo
+
+        Args:
+            start_date: "YYYY-MM-DD"
+            end_date:   "YYYY-MM-DD"
+            symbols:    Optional filter, e.g. ["NIFTY", "BANKNIFTY"]
+
+        Returns:
+            DataFrame with all F&O contract data for the date range.
+        """
+        start = pd.to_datetime(start_date)
+        end = pd.to_datetime(end_date)
+
+        frames = []
+        date = start
+        missing = []
+
+        while date <= end:
+            fname = self.bhavcopy_dir / f"fo{date.strftime('%d%m%Y')}bhav.csv"
+            if fname.exists():
+                try:
+                    df = pd.read_csv(fname)
+                    df = self._clean_bhavcopy(df, date)
+                    frames.append(df)
+                except Exception as e:
+                    logger.warning(f"Failed to parse {fname}: {e}")
+            else:
+                if date.weekday() < 5:   # only flag weekdays
+                    missing.append(date.strftime("%d-%m-%Y"))
+            date += pd.Timedelta(days=1)
+
+        if missing:
+            logger.warning(f"Missing bhavcopy files ({len(missing)}): {missing[:5]}...")
+
+        if not frames:
+            logger.error("No bhavcopy data loaded. Check data/bhavcopy/ directory.")
+            return pd.DataFrame()
+
+        result = pd.concat(frames, ignore_index=True)
+
+        if symbols:
+            result = result[result["SYMBOL"].isin(symbols)]
+
+        logger.info(
+            f"Loaded bhavcopy: {len(result):,} rows | "
+            f"{result['DATE'].nunique()} trading days | "
+            f"{result['SYMBOL'].nunique()} symbols"
+        )
+        return result
+
+    def _clean_bhavcopy(self, df: pd.DataFrame, date: dt.datetime) -> pd.DataFrame:
+        """Standardise column names and dtypes for a single bhavcopy file."""
+        # Normalise column names (NSE changes these occasionally)
+        col_map = {
+            "INSTRUMENT": "INSTRUMENT",
+            "SYMBOL":     "SYMBOL",
+            "EXPIRY_DT":  "EXPIRY_DT",
+            "STRIKE_PR":  "STRIKE_PR",
+            "OPTION_TYP": "OPTION_TYP",
+            "OPEN":       "OPEN",
+            "HIGH":       "HIGH",
+            "LOW":        "LOW",
+            "CLOSE":      "CLOSE",
+            "SETTLE_PR":  "SETTLE_PR",
+            "CONTRACTS":  "CONTRACTS",
+            "VAL_INLAKH": "VAL_INLAKH",
+            "OPEN_INT":   "OPEN_INT",
+            "CHG_IN_OI":  "CHG_IN_OI",
+            "TIMESTAMP":  "TIMESTAMP",
+        }
+        df = df.rename(columns={c: col_map.get(c, c) for c in df.columns})
+
+        # Add trading date
+        df["DATE"] = pd.to_datetime(date).normalize()
+
+        # Parse expiry
+        if "EXPIRY_DT" in df.columns:
+            df["EXPIRY_DT"] = pd.to_datetime(df["EXPIRY_DT"], format="%d-%b-%Y",
+                                              errors="coerce")
+
+        # Numeric coercion
+        for col in ["OPEN", "HIGH", "LOW", "CLOSE", "SETTLE_PR",
+                    "CONTRACTS", "VAL_INLAKH", "OPEN_INT", "CHG_IN_OI", "STRIKE_PR"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        # Drop rows where no price data
+        df = df.dropna(subset=["CLOSE"])
+
+        # Compute DTE
+        df["DTE"] = (df["EXPIRY_DT"] - df["DATE"]).dt.days.clip(lower=0)
+
+        # Near-expiry flag (weekly)
+        df["NEAR_EXPIRY"] = (df["DTE"] <= 2).astype(int)
+
+        return df
+
+    def download_bhavcopy(self, date: dt.datetime) -> Optional[pd.DataFrame]:
+        """
+        Attempt to download today's bhavcopy directly from NSE via nsefin,
+        fallback to direct URL download.
+        """
+        if NSEFIN_AVAILABLE:
+            try:
+                df = self.nse_client.get_fno_bhav_copy(date)
+                df = self.nse_client.format_fo_data(df)
+                logger.info(f"Downloaded bhavcopy via nsefin for {date.date()}")
+                return df
+            except Exception as e:
+                logger.warning(f"nsefin bhavcopy failed: {e}. Trying direct download...")
+
+        # Direct NSE URL fallback
+        url = (
+            f"https://www.nseindia.com/content/historical/DERIVATIVES/"
+            f"{date.year}/{date.strftime('%b').upper()}/"
+            f"fo{date.strftime('%d%b%Y').upper()}bhav.csv.zip"
+        )
+        try:
+            session = self._get_nse_session()
+            resp = session.get(url, timeout=15)
+            if resp.status_code == 200:
+                import io, zipfile
+                with zipfile.ZipFile(io.BytesIO(resp.content)) as z:
+                    fname = z.namelist()[0]
+                    df = pd.read_csv(z.open(fname))
+                # Save locally
+                save_path = self.bhavcopy_dir / f"fo{date.strftime('%d%m%Y')}bhav.csv"
+                df.to_csv(save_path, index=False)
+                logger.info(f"Downloaded and saved bhavcopy: {save_path}")
+                return self._clean_bhavcopy(df, date)
+        except Exception as e:
+            logger.error(f"Direct bhavcopy download failed for {date.date()}: {e}")
+        return None
+
+    # ─── 2. LIVE OPTION CHAIN ─────────────────────────────────────────────────
+    def get_live_option_chain(
+        self,
+        symbol: str = "NIFTY",
+        expiry: Optional[str] = None,
+    ) -> pd.DataFrame:
+        """
+        Fetch live option chain snapshot for a symbol.
+        Returns full chain with columns: strike, CE_OI, CE_chg_OI, CE_IV,
+        CE_delta, CE_LTP, PE_OI, PE_chg_OI, PE_IV, PE_delta, PE_LTP,
+        total_OI, pcr_strike
+
+        Priority: nsefin → nsepython → direct NSE API
+        """
+        # --- nsefin ---
+        if NSEFIN_AVAILABLE:
+            try:
+                oc = self.nse_client.get_option_chain(symbol)
+                df = self._parse_nsefin_option_chain(oc, symbol)
+                logger.info(f"Live option chain fetched via nsefin: {symbol} ({len(df)} strikes)")
+                return df
+            except Exception as e:
+                logger.warning(f"nsefin option chain failed: {e}")
+
+        # --- nsepython PCR + direct chain ---
+        if NSEPYTHON_AVAILABLE:
+            try:
+                oc_url = (
+                    f"https://www.nseindia.com/api/option-chain-indices?symbol={symbol}"
+                    if symbol in ["NIFTY", "BANKNIFTY", "FINNIFTY"]
+                    else f"https://www.nseindia.com/api/option-chain-equities?symbol={symbol}"
+                )
+                raw = nsefetch(oc_url)
+                df = self._parse_raw_option_chain(raw, symbol)
+                logger.info(f"Live option chain fetched via nsepython: {symbol}")
+                return df
+            except Exception as e:
+                logger.warning(f"nsepython option chain failed: {e}")
+
+        # --- Direct NSE API ---
+        try:
+            session = self._get_nse_session()
+            url = (
+                f"{NSE_BASE}/option-chain-indices?symbol={symbol}"
+                if symbol in ["NIFTY", "BANKNIFTY", "FINNIFTY"]
+                else f"{NSE_BASE}/option-chain-equities?symbol={symbol}"
+            )
+            resp = session.get(url, timeout=10)
+            resp.raise_for_status()
+            raw = resp.json()
+            df = self._parse_raw_option_chain(raw, symbol)
+            logger.info(f"Live option chain fetched via direct API: {symbol}")
+            return df
+        except Exception as e:
+            logger.error(f"All option chain sources failed for {symbol}: {e}")
+            return pd.DataFrame()
+
+    def _parse_nsefin_option_chain(self, oc: dict, symbol: str) -> pd.DataFrame:
+        """Parse nsefin option chain dict into a clean strike-wise DataFrame."""
+        rows = []
+        data = oc.get("records", {}).get("data", [])
+        underlying = oc.get("records", {}).get("underlyingValue", np.nan)
+
+        for item in data:
+            strike = item.get("strikePrice", np.nan)
+            ce = item.get("CE", {})
+            pe = item.get("PE", {})
+            rows.append({
+                "STRIKE":        strike,
+                "CE_OI":         ce.get("openInterest", 0),
+                "CE_CHG_OI":     ce.get("changeinOpenInterest", 0),
+                "CE_IV":         ce.get("impliedVolatility", np.nan),
+                "CE_LTP":        ce.get("lastPrice", np.nan),
+                "CE_VOLUME":     ce.get("totalTradedVolume", 0),
+                "CE_DELTA":      ce.get("delta", np.nan),
+                "CE_THETA":      ce.get("theta", np.nan),
+                "CE_GAMMA":      ce.get("gamma", np.nan),
+                "CE_VEGA":       ce.get("vega", np.nan),
+                "PE_OI":         pe.get("openInterest", 0),
+                "PE_CHG_OI":     pe.get("changeinOpenInterest", 0),
+                "PE_IV":         pe.get("impliedVolatility", np.nan),
+                "PE_LTP":        pe.get("lastPrice", np.nan),
+                "PE_VOLUME":     pe.get("totalTradedVolume", 0),
+                "PE_DELTA":      pe.get("delta", np.nan),
+                "PE_THETA":      pe.get("theta", np.nan),
+                "PE_GAMMA":      pe.get("gamma", np.nan),
+                "PE_VEGA":       pe.get("vega", np.nan),
+                "UNDERLYING":    underlying,
+            })
+
+        df = pd.DataFrame(rows).sort_values("STRIKE").reset_index(drop=True)
+        df["PCR_STRIKE"] = np.where(df["CE_OI"] > 0, df["PE_OI"] / df["CE_OI"].replace(0, np.nan), np.nan)
+        return df
+
+    def _parse_raw_option_chain(self, raw: dict, symbol: str) -> pd.DataFrame:
+        """Parse raw NSE JSON option chain response."""
+        rows = []
+        underlying = raw.get("records", {}).get("underlyingValue", np.nan)
+        for item in raw.get("records", {}).get("data", []):
+            strike = item.get("strikePrice", np.nan)
+            ce = item.get("CE", {})
+            pe = item.get("PE", {})
+            rows.append({
+                "STRIKE":    strike,
+                "CE_OI":     ce.get("openInterest", 0),
+                "CE_CHG_OI": ce.get("changeinOpenInterest", 0),
+                "CE_IV":     ce.get("impliedVolatility", np.nan),
+                "CE_LTP":    ce.get("lastPrice", np.nan),
+                "CE_VOLUME": ce.get("totalTradedVolume", 0),
+                "PE_OI":     pe.get("openInterest", 0),
+                "PE_CHG_OI": pe.get("changeinOpenInterest", 0),
+                "PE_IV":     pe.get("impliedVolatility", np.nan),
+                "PE_LTP":    pe.get("lastPrice", np.nan),
+                "PE_VOLUME": pe.get("totalTradedVolume", 0),
+                "UNDERLYING": underlying,
+            })
+        df = pd.DataFrame(rows).sort_values("STRIKE").reset_index(drop=True)
+        df["PCR_STRIKE"] = np.where(df["CE_OI"] > 0, df["PE_OI"] / df["CE_OI"].replace(0, np.nan), np.nan)
+        return df
+
+    # ─── 3. INDIA VIX ─────────────────────────────────────────────────────────
+    def load_india_vix(self) -> pd.DataFrame:
+        """
+        Load India VIX data.
+        Sources: local CSV file → yfinance (^INDIAVIX) → NSE direct
+        """
+        # Try local CSV first
+        if self.vix_file.exists():
+            df = pd.read_csv(self.vix_file)
+            df = self._clean_vix_df(df)
+            logger.info(f"VIX loaded from local file: {len(df)} rows")
+            return df
+
+        # Try yfinance
+        try:
+            df = yf.download("^INDIAVIX", start="2010-01-01",
+                             progress=False, auto_adjust=True)
+            df = df.reset_index()
+            df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
+            df = df.rename(columns={"Date": "DATE", "Close": "VIX_CLOSE",
+                                    "Open": "VIX_OPEN", "High": "VIX_HIGH",
+                                    "Low": "VIX_LOW"})
+            df["DATE"] = pd.to_datetime(df["DATE"]).dt.normalize()
+            df = df[["DATE", "VIX_OPEN", "VIX_HIGH", "VIX_LOW", "VIX_CLOSE"]].dropna()
+            # Save locally for next run
+            df.to_csv(self.vix_file, index=False)
+            logger.info(f"VIX downloaded from yfinance: {len(df)} rows")
+            return df
+        except Exception as e:
+            logger.warning(f"yfinance VIX failed: {e}")
+
+        logger.error("Could not load India VIX from any source.")
+        return pd.DataFrame()
+
+    def _clean_vix_df(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Standardise NSE VIX CSV columns (NSE naming varies)."""
+        col_map = {}
+        for col in df.columns:
+            lo = col.strip().lower()
+            if "date" in lo:
+                col_map[col] = "DATE"
+            elif lo in ("close", "eod_price"):
+                col_map[col] = "VIX_CLOSE"
+            elif lo == "open":
+                col_map[col] = "VIX_OPEN"
+            elif lo == "high":
+                col_map[col] = "VIX_HIGH"
+            elif lo == "low":
+                col_map[col] = "VIX_LOW"
+        df = df.rename(columns=col_map)
+        df["DATE"] = pd.to_datetime(df["DATE"], dayfirst=True, errors="coerce").dt.normalize()
+        for c in ["VIX_CLOSE", "VIX_OPEN", "VIX_HIGH", "VIX_LOW"]:
+            if c in df.columns:
+                df[c] = pd.to_numeric(df[c], errors="coerce")
+        df = df.dropna(subset=["DATE", "VIX_CLOSE"]).sort_values("DATE").reset_index(drop=True)
+        return df
+
+    # ─── 4. FII / DII DATA ────────────────────────────────────────────────────
+    def load_fii_dii(self) -> pd.DataFrame:
+        """
+        Load FII/DII net flow data.
+        Sources: nsefin → local CSV → NSE direct
+        """
+        if NSEFIN_AVAILABLE:
+            try:
+                df = self.nse_client.get_fii_dii_data()
+                df = self._clean_fii_df(df)
+                df.to_csv(self.fii_file, index=False)
+                logger.info(f"FII/DII loaded via nsefin: {len(df)} rows")
+                return df
+            except Exception as e:
+                logger.warning(f"nsefin FII/DII failed: {e}")
+
+        if self.fii_file.exists():
+            df = pd.read_csv(self.fii_file)
+            df = self._clean_fii_df(df)
+            logger.info(f"FII/DII loaded from local CSV: {len(df)} rows")
+            return df
+
+        # NSE direct API
+        try:
+            session = self._get_nse_session()
+            url = f"{NSE_BASE}/fiidiiTradeReact"
+            resp = session.get(url, timeout=10)
+            data = resp.json()
+            df = pd.DataFrame(data)
+            df = self._clean_fii_df(df)
+            df.to_csv(self.fii_file, index=False)
+            logger.info(f"FII/DII downloaded from NSE API: {len(df)} rows")
+            return df
+        except Exception as e:
+            logger.error(f"All FII/DII sources failed: {e}")
+            return pd.DataFrame()
+
+    def _clean_fii_df(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Standardise FII/DII columns across data sources."""
+        col_map = {}
+        for col in df.columns:
+            lo = col.strip().lower().replace(" ", "_")
+            if "date" in lo:
+                col_map[col] = "DATE"
+            elif "fii" in lo and "cash" in lo and ("buy" in lo or "purchase" in lo):
+                col_map[col] = "FII_CASH_BUY"
+            elif "fii" in lo and "cash" in lo and "sell" in lo:
+                col_map[col] = "FII_CASH_SELL"
+            elif "fii" in lo and ("fut" in lo or "deriv" in lo) and ("buy" in lo or "purchase" in lo):
+                col_map[col] = "FII_FNO_BUY"
+            elif "fii" in lo and ("fut" in lo or "deriv" in lo) and "sell" in lo:
+                col_map[col] = "FII_FNO_SELL"
+            elif "dii" in lo and ("buy" in lo or "purchase" in lo):
+                col_map[col] = "DII_BUY"
+            elif "dii" in lo and "sell" in lo:
+                col_map[col] = "DII_SELL"
+
+        df = df.rename(columns=col_map)
+        if "DATE" in df.columns:
+            df["DATE"] = pd.to_datetime(df["DATE"], dayfirst=True, errors="coerce").dt.normalize()
+
+        # Compute net flows
+        for kind in [("FII_CASH", "FII_CASH_BUY", "FII_CASH_SELL"),
+                     ("FII_FNO",  "FII_FNO_BUY",  "FII_FNO_SELL"),
+                     ("DII",      "DII_BUY",       "DII_SELL")]:
+            net_col, buy_col, sell_col = kind
+            if buy_col in df.columns and sell_col in df.columns:
+                df[f"{net_col}_NET"] = (
+                    pd.to_numeric(df[buy_col], errors="coerce") -
+                    pd.to_numeric(df[sell_col], errors="coerce")
+                )
+
+        df = df.sort_values("DATE").reset_index(drop=True)
+        return df
+
+    # ─── 5. EQUITY OHLCV (yfinance) ───────────────────────────────────────────
+    def load_equity_ohlcv(
+        self,
+        tickers: Optional[Dict[str, str]] = None,
+        start_date: str = "2018-01-01",
+    ) -> pd.DataFrame:
+        """
+        Download OHLCV for underlying indices and macro assets via yfinance.
+
+        Default tickers:
+          ^NSEI        = Nifty 50
+          ^NSEBANK     = Bank Nifty
+          ^NSMIDCP     = Nifty Midcap
+          ^INDIAVIX    = India VIX
+          INR=X        = USD/INR
+          GC=F         = Gold futures
+          CL=F         = Crude oil
+          ^GSPC        = S&P 500 (overnight signal)
+          ^NDX         = Nasdaq 100
+          USDINR=X     = USD-INR
+        """
+        if tickers is None:
+            tickers = {
+                "^NSEI":    "NIFTY",
+                "^NSEBANK": "BANKNIFTY",
+                "^NSMIDCP": "MIDCAP",
+                "INR=X":    "USDINR",
+                "GC=F":     "GOLD",
+                "CL=F":     "CRUDE",
+                "^GSPC":    "SPX",
+                "^NDX":     "NDX",
+            }
+
+        frames = []
+        for ticker, name in tickers.items():
+            try:
+                raw = yf.download(ticker, start=start_date,
+                                  progress=False, auto_adjust=True)
+                if raw.empty:
+                    continue
+                raw = raw.reset_index()
+                raw.columns = [c[0] if isinstance(c, tuple) else c for c in raw.columns]
+                raw = raw.rename(columns={
+                    "Date":   "DATE",
+                    "Open":   f"{name}_OPEN",
+                    "High":   f"{name}_HIGH",
+                    "Low":    f"{name}_LOW",
+                    "Close":  f"{name}_CLOSE",
+                    "Volume": f"{name}_VOLUME",
+                })
+                raw["DATE"] = pd.to_datetime(raw["DATE"]).dt.normalize()
+                keep = ["DATE"] + [c for c in raw.columns if c.startswith(name)]
+                frames.append(raw[keep])
+                logger.info(f"Downloaded {name} ({ticker}): {len(raw)} rows")
+            except Exception as e:
+                logger.warning(f"yfinance failed for {ticker}: {e}")
+
+        if not frames:
+            return pd.DataFrame()
+
+        result = frames[0]
+        for f in frames[1:]:
+            result = result.merge(f, on="DATE", how="outer")
+        result = result.sort_values("DATE").reset_index(drop=True)
+        return result
+
+    # ─── 6. NSE PARTICIPANT-WISE OI (FII Long/Short ratio) ────────────────────
+    def get_participant_oi(self) -> pd.DataFrame:
+        """
+        Fetch NSE participant-wise OI data.
+        Shows FII, DII, PRO, CLIENT positions in futures (long/short).
+        Very useful: FII long/short ratio in index futures is a key signal.
+        """
+        if NSEPYTHON_AVAILABLE:
+            try:
+                url = f"{NSE_BASE}/equity-stockIndices?index=PARTICIPANT_OI"
+                raw = nsefetch(url)
+                df = pd.DataFrame(raw.get("data", []))
+                logger.info(f"Participant OI fetched: {len(df)} rows")
+                return df
+            except Exception as e:
+                logger.warning(f"nsepython participant OI failed: {e}")
+
+        try:
+            session = self._get_nse_session()
+            url = f"{NSE_BASE}/fii-dii"
+            resp = session.get(url, timeout=10)
+            data = resp.json()
+            df = pd.DataFrame(data if isinstance(data, list) else [])
+            logger.info(f"Participant OI from direct API: {len(df)} rows")
+            return df
+        except Exception as e:
+            logger.error(f"Participant OI fetch failed: {e}")
+            return pd.DataFrame()
+
+    # ─── 7. PCR AGGREGATION ───────────────────────────────────────────────────
+    def compute_aggregate_pcr(
+        self,
+        chain_df: pd.DataFrame,
+        underlying_price: float,
+        n_strikes: int = ATM_RANGE_STRIKES,
+        step: float = NIFTY_STRIKE_STEP,
+    ) -> Dict[str, float]:
+        """
+        Compute multiple PCR variants from an option chain DataFrame.
+
+        Returns:
+            pcr_atm:          PCR using ATM ± n_strikes strikes
+            pcr_full:         PCR using full chain
+            pcr_otm:          PCR of OTM options only
+            put_call_ratio_oi: standard OI-based PCR
+            put_call_ratio_vol: volume-based PCR
+            max_call_oi_strike: strike with highest call OI (resistance)
+            max_put_oi_strike:  strike with highest put OI (support)
+            max_pain:           max pain strike price
+        """
+        if chain_df.empty:
+            return {}
+
+        # ATM-range PCR
+        atm = round(underlying_price / step) * step
+        atm_range = chain_df[
+            (chain_df["STRIKE"] >= atm - n_strikes * step) &
+            (chain_df["STRIKE"] <= atm + n_strikes * step)
+        ]
+
+        def safe_pcr(df, oi_col_put="PE_OI", oi_col_call="CE_OI"):
+            total_call = df[oi_col_call].sum()
+            return df[oi_col_put].sum() / total_call if total_call > 0 else np.nan
+
+        # OTM only: puts below ATM, calls above ATM
+        otm_puts = chain_df[chain_df["STRIKE"] < atm]["PE_OI"].sum()
+        otm_calls = chain_df[chain_df["STRIKE"] > atm]["CE_OI"].sum()
+        pcr_otm = otm_puts / otm_calls if otm_calls > 0 else np.nan
+
+        # Max pain
+        max_pain = self._compute_max_pain(chain_df)
+
+        # GEX (Gamma Exposure) if gamma available
+        gex = np.nan
+        if "CE_GAMMA" in chain_df.columns and "PE_GAMMA" in chain_df.columns:
+            gex = (
+                (chain_df["CE_GAMMA"] * chain_df["CE_OI"]).sum() -
+                (chain_df["PE_GAMMA"] * chain_df["PE_OI"]).sum()
+            ) * underlying_price ** 2 * 0.01
+
+        return {
+            "pcr_atm":            safe_pcr(atm_range),
+            "pcr_full":           safe_pcr(chain_df),
+            "pcr_otm":            pcr_otm,
+            "pcr_volume":         safe_pcr(chain_df, "PE_VOLUME", "CE_VOLUME"),
+            "max_call_oi_strike": chain_df.loc[chain_df["CE_OI"].idxmax(), "STRIKE"]
+                                  if not chain_df.empty else np.nan,
+            "max_put_oi_strike":  chain_df.loc[chain_df["PE_OI"].idxmax(), "STRIKE"]
+                                  if not chain_df.empty else np.nan,
+            "max_pain":           max_pain,
+            "gex":                gex,
+            "atm_iv_call":        chain_df.loc[chain_df["STRIKE"] == atm, "CE_IV"].values[0]
+                                  if atm in chain_df["STRIKE"].values else np.nan,
+            "atm_iv_put":         chain_df.loc[chain_df["STRIKE"] == atm, "PE_IV"].values[0]
+                                  if atm in chain_df["STRIKE"].values else np.nan,
+            "iv_skew":            (
+                chain_df.loc[chain_df["STRIKE"] == atm, "CE_IV"].values[0] -
+                chain_df.loc[chain_df["STRIKE"] == atm, "PE_IV"].values[0]
+            ) if atm in chain_df["STRIKE"].values else np.nan,
+        }
+
+    def _compute_max_pain(self, chain_df: pd.DataFrame) -> float:
+        """
+        Compute max pain strike: the strike at which total option buyer losses
+        (i.e., total option writer profit) are maximized.
+        """
+        if chain_df.empty:
+            return np.nan
+        strikes = chain_df["STRIKE"].unique()
+        min_pain = float("inf")
+        max_pain_strike = strikes[0]
+
+        for s in strikes:
+            # Call buyer losses at expiry = sum of (strike - S) * OI for strikes < S
+            call_loss = sum(
+                max(0, k - s) * chain_df.loc[chain_df["STRIKE"] == k, "CE_OI"].values[0]
+                for k in strikes
+            )
+            # Put buyer losses at expiry = sum of (S - strike) * OI for strikes > S
+            put_loss = sum(
+                max(0, s - k) * chain_df.loc[chain_df["STRIKE"] == k, "PE_OI"].values[0]
+                for k in strikes
+            )
+            total_pain = call_loss + put_loss
+            if total_pain < min_pain:
+                min_pain = total_pain
+                max_pain_strike = s
+
+        return float(max_pain_strike)
+
+    # ─── 8. MASTER MERGE ──────────────────────────────────────────────────────
+    def get_full_dataset(
+        self,
+        start_date: str = "2021-01-01",
+        end_date: Optional[str] = None,
+        symbols: Optional[List[str]] = None,
+    ) -> pd.DataFrame:
+        """
+        Build the complete merged dataset ready for feature engineering.
+
+        Returns a DataFrame indexed by (DATE, SYMBOL) with bhavcopy,
+        VIX, FII/DII, and equity OHLCV columns merged.
+        """
+        if end_date is None:
+            end_date = dt.date.today().strftime("%Y-%m-%d")
+
+        if symbols is None:
+            symbols = ["NIFTY", "BANKNIFTY"]
+
+        logger.info(f"Building full dataset: {start_date} → {end_date} | symbols: {symbols}")
+
+        # Load all sources
+        bhav    = self.load_bhavcopy_range(start_date, end_date, symbols)
+        vix     = self.load_india_vix()
+        fii_dii = self.load_fii_dii()
+        equity  = self.load_equity_ohlcv(start_date=start_date)
+
+        if bhav.empty:
+            logger.error("Bhavcopy data is empty — cannot build dataset.")
+            return pd.DataFrame()
+
+        # Merge on DATE
+        df = bhav.copy()
+
+        if not vix.empty:
+            vix_cols = ["DATE"] + [c for c in vix.columns if c.startswith("VIX")]
+            df = df.merge(vix[vix_cols], on="DATE", how="left")
+
+        if not fii_dii.empty:
+            net_cols = ["DATE"] + [c for c in fii_dii.columns if c.endswith("_NET")]
+            df = df.merge(fii_dii[net_cols], on="DATE", how="left")
+
+        if not equity.empty:
+            df = df.merge(equity, on="DATE", how="left")
+
+        # Forward-fill macro data for non-trading days
+        macro_cols = [c for c in df.columns
+                      if any(c.startswith(p) for p in
+                             ["VIX", "FII", "DII", "NIFTY_", "BANKNIFTY_",
+                              "SPX_", "NDX_", "USDINR_", "GOLD_", "CRUDE_"])]
+        df[macro_cols] = df.groupby("SYMBOL")[macro_cols].ffill()
+
+        df = df.sort_values(["DATE", "SYMBOL"]).reset_index(drop=True)
+
+        logger.info(
+            f"Full dataset ready: {len(df):,} rows | "
+            f"{df['DATE'].nunique()} trading days | "
+            f"columns: {df.shape[1]}"
+        )
+        return df
+
+
+# ─── CLI test ─────────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    collector = DataCollector()
+
+    # Quick connectivity check
+    print("\n=== DATA COLLECTOR TEST ===\n")
+
+    # Test VIX
+    vix = collector.load_india_vix()
+    if not vix.empty:
+        print(f"✓ India VIX: {len(vix)} rows | latest: {vix.iloc[-1]['DATE'].date()} = {vix.iloc[-1]['VIX_CLOSE']:.2f}")
+
+    # Test FII/DII
+    fii = collector.load_fii_dii()
+    if not fii.empty:
+        net_cols = [c for c in fii.columns if "NET" in c]
+        print(f"✓ FII/DII:   {len(fii)} rows | net flow cols: {net_cols}")
+
+    # Test equity OHLCV
+    eq = collector.load_equity_ohlcv(start_date="2024-01-01")
+    if not eq.empty:
+        print(f"✓ Equity OHLCV: {len(eq)} rows | {eq.shape[1]} columns")
+
+    # Test live option chain
+    print("\nFetching live NIFTY option chain...")
+    oc = collector.get_live_option_chain("NIFTY")
+    if not oc.empty:
+        atm_pcr = collector.compute_aggregate_pcr(oc, oc["UNDERLYING"].iloc[0])
+        print(f"✓ Option Chain: {len(oc)} strikes")
+        print(f"  PCR (ATM):     {atm_pcr.get('pcr_atm', 'N/A'):.3f}")
+        print(f"  PCR (full):    {atm_pcr.get('pcr_full', 'N/A'):.3f}")
+        print(f"  Max Pain:      {atm_pcr.get('max_pain', 'N/A')}")
+        print(f"  ATM Call IV:   {atm_pcr.get('atm_iv_call', 'N/A')}")
+        print(f"  IV Skew:       {atm_pcr.get('iv_skew', 'N/A')}")
+
+    print("\n=== TEST COMPLETE ===")
