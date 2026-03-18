@@ -9,6 +9,29 @@ tensorflow>=2.13.0
 keras>=2.13.0
 joblib>=1.3.0
 
+# ── Deep Learning & Time Series Models ────────────────────────────────────────
+torch>=2.0.0                    # PyTorch for TFT
+pytorch-lightning>=2.0.0        # Lightning framework
+pytorch-forecasting>=1.0.0      # Temporal Fusion Transformer
+lightning>=2.0.0               # Lightning utilities
+
+# ── Gradient Boosting ─────────────────────────────────────────────────────────
+lightgbm>=4.0.0                 # LightGBM for ensemble
+xgboost>=2.0.0                  # XGBoost for ensemble
+
+# ── Hyperparameter Optimization ───────────────────────────────────────────────
+optuna>=3.3.0                   # Bayesian optimization
+optuna-integration>=3.3.0       # Optuna integrations
+
+# ── Explainability ────────────────────────────────────────────────────────────
+shap>=0.43.0                    # SHAP values for model interpretation
+
+# ── Drift Detection ───────────────────────────────────────────────────────────
+river>=0.18.0                   # Online learning & ADWIN drift detection
+
+# ── Conformal Prediction ──────────────────────────────────────────────────────
+mapie>=0.6.0                    # Conformal prediction intervals
+
 # ── Technical indicators ──────────────────────────────────────────────────────
 pandas-ta>=0.3.14b0      # 130+ indicators, no TA-Lib C dependency needed
 

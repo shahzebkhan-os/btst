@@ -74,3 +74,62 @@ DIRECTION_THRESHOLD = 0.005      # 0.5% return threshold for UP/DOWN label
 PREDICTOR_RUN_TIME = "15:00"     # 3:00 PM IST
 MARKET_CLOSE_TIME  = "15:30"     # 3:30 PM IST
 TIMEZONE           = "Asia/Kolkata"
+
+# ── TFT (Temporal Fusion Transformer) ────────────────────────────────────────
+TFT_HIDDEN_SIZE           = 64        # Hidden state size
+TFT_LSTM_LAYERS           = 2         # Number of LSTM layers
+TFT_ATTENTION_HEADS       = 4         # Multi-head attention heads
+TFT_DROPOUT               = 0.15      # Dropout rate
+TFT_HIDDEN_CONTINUOUS     = 16        # Hidden size for continuous variables
+TFT_MAX_ENCODER_LENGTH    = 20        # Historical lookback window
+TFT_MAX_PREDICTION_LENGTH = 1         # Predict next day only
+TFT_LEARNING_RATE         = 1e-3      # Adam learning rate
+TFT_GRADIENT_CLIP_VAL     = 0.1       # Gradient clipping threshold
+TFT_REDUCE_ON_PLATEAU_PATIENCE = 4    # LR scheduler patience
+
+# ── Ensemble Model ────────────────────────────────────────────────────────────
+ENSEMBLE_MODELS = ["tft", "lgbm", "xgb", "logreg"]  # Models in ensemble
+LGBM_N_ESTIMATORS         = 500       # LightGBM trees
+LGBM_MAX_DEPTH            = 10        # LightGBM max depth
+LGBM_LEARNING_RATE        = 0.05      # LightGBM learning rate
+LGBM_NUM_LEAVES           = 63        # LightGBM leaves per tree
+XGB_N_ESTIMATORS          = 500       # XGBoost trees
+XGB_MAX_DEPTH             = 8         # XGBoost max depth
+XGB_LEARNING_RATE         = 0.05      # XGBoost learning rate
+XGB_SUBSAMPLE             = 0.8       # XGBoost row sampling
+LOGREG_C                  = 1.0       # Logistic Regression regularization
+LOGREG_MAX_ITER           = 1000      # Logistic Regression iterations
+META_LEARNER_TYPE         = "logreg"  # Meta-learner: logreg, ridge, lasso
+
+# ── Focal Loss ────────────────────────────────────────────────────────────────
+FOCAL_ALPHA               = [0.25, 0.5, 0.25]  # Class weights [DOWN, FLAT, UP]
+FOCAL_GAMMA               = 2.0       # Focusing parameter (higher = more focus on hard examples)
+
+# ── Optuna Hyperparameter Optimization ────────────────────────────────────────
+OPTUNA_N_TRIALS           = 100       # Number of optimization trials
+OPTUNA_TIMEOUT            = None      # Time limit (seconds), None = no limit
+OPTUNA_N_JOBS             = 4         # Parallel trials
+OPTUNA_PRUNER             = "median"  # Pruner: median, hyperband, percentile
+OPTUNA_SAMPLER            = "tpe"     # Sampler: tpe, random, grid
+
+# ── Calibration ───────────────────────────────────────────────────────────────
+TEMP_SCALING_ENABLED      = True      # Enable temperature scaling
+CONFORMAL_ALPHA           = 0.1       # Conformal prediction miscoverage rate (90% intervals)
+CONFORMAL_METHOD          = "lac"     # Conformal method: naive, lac, aps, raps
+
+# ── Kelly Criterion & Position Sizing ─────────────────────────────────────────
+KELLY_FRACTION            = 0.25      # Fractional Kelly (25% of full Kelly)
+VOLATILITY_TARGET         = 0.15      # Target annual volatility (15%)
+DRAWDOWN_CIRCUIT_BREAKER  = 0.10      # Stop trading if drawdown > 10%
+MAX_LEVERAGE              = 1.0       # No leverage in F&O positions
+
+# ── Drift Detection & Retraining ──────────────────────────────────────────────
+ADWIN_DELTA               = 0.002     # ADWIN sensitivity (lower = more sensitive)
+DRIFT_RETRAIN_DAYS        = 7         # Retrain every N days regardless of drift
+FEATURE_DRIFT_THRESHOLD   = 0.05      # KS test p-value threshold for feature drift
+
+# ── Explainability ────────────────────────────────────────────────────────────
+SHAP_BACKGROUND_SIZE      = 100       # SHAP background dataset size
+SHAP_N_SAMPLES            = 500       # Number of samples for SHAP values
+EXTRACT_ATTENTION_WEIGHTS = True      # Extract TFT attention weights
+USE_INTEGRATED_GRADIENTS  = True      # Use integrated gradients for TensorFlow models
