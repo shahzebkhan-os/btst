@@ -710,6 +710,49 @@ class FeatureEngineer:
         return df
 
     # ─────────────────────────────────────────────────────────────────────
+    # 14. VELOCITY & ACCELERATION
+    # ─────────────────────────────────────────────────────────────────────
+    def _add_velocity_acceleration_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Price velocity (first derivative) and acceleration (second derivative).
+        These capture momentum and momentum changes.
+        """
+        c = df["CLOSE"]
+
+        # Velocity: Rate of price change (first derivative)
+        for p in [1, 3, 5, 10]:
+            df[f"velocity_{p}d"] = c.diff(p) / p
+
+        # Acceleration: Rate of velocity change (second derivative)
+        for p in [3, 5, 10]:
+            vel_col = f"velocity_{p}d"
+            if vel_col in df.columns:
+                df[f"accel_{p}d"] = df[vel_col].diff()
+
+        # Normalized velocity (relative to ATR)
+        if "atr_14" in df.columns:
+            df["velocity_norm_5d"] = df["velocity_5d"] / (df["atr_14"] + 1e-9)
+
+        # Momentum change detection
+        df["velocity_reversal"] = (
+            (df["velocity_5d"].shift(1) > 0) & (df["velocity_5d"] < 0)
+        ).astype(int) - (
+            (df["velocity_5d"].shift(1) < 0) & (df["velocity_5d"] > 0)
+        ).astype(int)
+
+        # Jerk (third derivative) for very short-term changes
+        if "accel_5d" in df.columns:
+            df["jerk_5d"] = df["accel_5d"].diff()
+
+        # Velocity correlation with volume
+        if VOL_COL in df.columns:
+            vol = df[VOL_COL].clip(lower=1)
+            for p in [5, 20]:
+                df[f"velocity_vol_corr_{p}d"] = df[f"velocity_{p}d"].rolling(p).corr(vol)
+
+        return df
+
+    # ─────────────────────────────────────────────────────────────────────
     # TARGET VARIABLE
     # ─────────────────────────────────────────────────────────────────────
     def _add_target(self, df: pd.DataFrame) -> pd.DataFrame:
