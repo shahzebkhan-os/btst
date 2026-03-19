@@ -41,7 +41,7 @@ import joblib
 from data_collector import DataCollector
 from feature_engineering import FeatureEngineer
 from market_data_extended import MarketDataExtended
-from model_architecture import EnsembleModel
+from model_architecture import EnsemblePredictor
 from calibration import CalibrationManager
 import config
 
@@ -155,7 +155,7 @@ class PredictionPipeline:
         self.liquidity_filter = LiquidityFilter()
 
         # Model and calibrator
-        self.ensemble: Optional[EnsembleModel] = None
+        self.ensemble: Optional[EnsemblePredictor] = None
         self.calibration_manager: Optional[CalibrationManager] = None
 
         # Load model
@@ -265,46 +265,20 @@ class PredictionPipeline:
     ) -> pd.DataFrame:
         """
         Generate model predictions.
-
-        Args:
-            df: DataFrame with features
-
-        Returns:
-            DataFrame with predictions
         """
-        logger.info("Generating predictions...")
+        logger.info("Generating predictions using EnsemblePredictor...")
 
-        # Prepare features
-        feature_cols = [
-            c for c in df.columns
-            if c not in ["DATE", "SYMBOL", "EXPIRY_DT", "INSTRUMENT",
-                        "OPTION_TYP", "TIMESTAMP", "NEAR_EXPIRY", "target",
-                        "liquidity_pass", "DTE"]
-        ]
-
-        X = df[feature_cols].values
-        X = np.nan_to_num(X, nan=0.0, posinf=1e10, neginf=-1e10)
-
-        # Get predictions
         if self.ensemble is None:
             raise ValueError("Model not loaded")
 
-        y_proba = self.ensemble.predict(X, return_probas=True)
-        y_pred = np.argmax(y_proba, axis=1)
-
-        # Add predictions to dataframe
-        df["pred_class"] = y_pred
-        df["pred_down"] = y_proba[:, 0]
-        df["pred_flat"] = y_proba[:, 1]
-        df["pred_up"] = y_proba[:, 2]
-        df["confidence"] = y_proba.max(axis=1)
-
-        # Map class to direction
-        direction_map = {0: "DOWN", 1: "FLAT", 2: "UP"}
-        df["direction"] = df["pred_class"].map(direction_map)
+        # The new EnsemblePredictor takes the whole DataFrame and returns a results DataFrame
+        res = self.ensemble.predict_proba(df)
+        
+        # Merge results back to original df
+        df = df.drop(columns=["p_down", "p_flat", "p_up", "direction", "confidence"], errors="ignore")
+        df = df.merge(res, on="SYMBOL", how="left")
 
         logger.info(f"Predictions generated for {len(df)} instruments")
-
         return df
 
     def rank_signals(
