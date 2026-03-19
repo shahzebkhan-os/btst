@@ -97,29 +97,42 @@ logs/                            # Execution logs
 pip install -r requirements.txt
 ```
 
-### Create Data Directories
+### Download Data
+
+Use the automated data downloader to fetch all required data:
 
 ```bash
-mkdir -p data/bhavcopy data/vix data/fii_dii models output logs
+# Download all data (last 2 years)
+python data_downloader.py --all
+
+# Or download specific data types
+python data_downloader.py --bhavcopy --vix --fii-dii
+
+# Specify custom date range
+python data_downloader.py --all --start-date 2022-01-01 --end-date 2024-12-31
 ```
+
+For detailed instructions, see **[DATA_SETUP.md](DATA_SETUP.md)**.
 
 ## 📊 Data Sources
 
 1. **NSE F&O Bhavcopy** (Historical OHLCV + OI)
-   - Download from NSE website or use `nsefin`
-   - Place in `data/bhavcopy/`
+   - Automatically downloaded to `data/bhavcopy/`
+   - Source: NSE archives via `jugaad_data` or direct download
 
 2. **India VIX**
-   - Download from NSE
-   - Place in `data/vix/india_vix.csv`
+   - Automatically downloaded to `data/vix/india_vix.csv`
+   - Source: yfinance (`^INDIAVIX`) or nsefin
 
 3. **FII/DII Flows**
-   - Download from NSE or use `nsefin`
-   - Place in `data/fii_dii/fii_dii_data.csv`
+   - Automatically downloaded to `data/fii_dii/fii_dii_data.csv`
+   - Source: nsefin or NSE direct API
 
 4. **Global Signals**
    - Automatically fetched via `yfinance`
    - No manual setup required
+
+**See [DATA_SETUP.md](DATA_SETUP.md) for comprehensive data setup guide.**
 
 ## 🎓 Usage
 
