@@ -110,9 +110,29 @@ python data_downloader.py --bhavcopy --vix --fii-dii
 
 # Specify custom date range
 python data_downloader.py --all --start-date 2022-01-01 --end-date 2024-12-31
+
+# Validate if data is sufficient for ML training
+python validate_data_sufficiency.py
 ```
 
 For detailed instructions, see **[DATA_SETUP.md](DATA_SETUP.md)**.
+
+### Validate Data Sufficiency
+
+Before training, check if your data meets minimum ML requirements:
+
+```bash
+python validate_data_sufficiency.py --verbose
+```
+
+This validates:
+- NSE Bhavcopy coverage (minimum 504 days)
+- India VIX coverage (minimum 504 days)
+- FII/DII flows (critical feature)
+- Global markets data (100+ tickers × 500+ days)
+- ML model requirements (features, parameters, sequences)
+
+See **[ML_DATA_REQUIREMENTS_EVALUATION.md](ML_DATA_REQUIREMENTS_EVALUATION.md)** for detailed analysis.
 
 ## 📊 Data Sources
 
