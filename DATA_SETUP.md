@@ -364,13 +364,13 @@ For enhanced functionality, install these optional libraries:
 
 ```bash
 # For better data access
-pip install nsefin nsepython jugaad-data
+pip3 install nsefin nsepython jugaad-data
 
 # For Google Trends sentiment
-pip install pytrends
+pip3 install pytrends
 
 # For progress bars
-pip install tqdm
+pip3 install tqdm
 ```
 
 ## Support

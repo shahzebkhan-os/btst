@@ -84,7 +84,7 @@ output/               # Daily signals
 ### Basic Usage
 ```bash
 # Download all data (recommended)
-python data_downloader.py --all
+python3 data_downloader.py --all
 
 # Download specific types
 python data_downloader.py --bhavcopy --vix --fii-dii

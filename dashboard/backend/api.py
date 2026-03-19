@@ -283,6 +283,13 @@ async def root():
     }
 
 
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    """Suppress favicon 404 logs"""
+    from fastapi import Response
+    return Response(status_code=204)
+
+
 @app.get("/api/signals/latest", response_model=SignalResponse)
 async def get_latest_signals():
     """Get today's top-5 F&O signals"""
@@ -426,7 +433,7 @@ async def get_data_status():
 
     # Define data sources to check
     data_sources = [
-        {"name": "NSE Bhavcopy", "path": "data/bhavcopy/*.csv", "max_age_hours": 24},
+        {"name": "NSE Bhavcopy", "path": "data/bhavcopy/**/*.csv", "max_age_hours": 24},
         {"name": "India VIX", "path": "data/vix/india_vix.csv", "max_age_hours": 24},
         {"name": "FII/DII", "path": "data/fii_dii/fii_dii_data.csv", "max_age_hours": 24},
         {"name": "NIFTY Option Chain", "path": "data/option_chain/nifty_*.csv", "max_age_hours": 2},

@@ -2,7 +2,7 @@
  * Explainability page - SHAP features
  */
 
-import { useQuery } from '@tantml:react-query'
+import { useQuery } from '@tanstack/react-query'
 import { getGlobalShap } from '@/lib/api'
 
 export function Explainability() {

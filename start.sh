@@ -14,7 +14,7 @@ NC='\033[0m' # No Color
 
 # Get script directory
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+REPO_ROOT="$SCRIPT_DIR"
 
 # Check if Python is available
 if ! command -v python3 &> /dev/null; then
@@ -50,7 +50,7 @@ sleep 2
 
 # Start Vite frontend
 echo -e "${BLUE}Starting Vite frontend...${NC}"
-cd "$SCRIPT_DIR/frontend"
+cd "$SCRIPT_DIR/dashboard/frontend"
 
 # Install dependencies if node_modules doesn't exist
 if [ ! -d "node_modules" ]; then
