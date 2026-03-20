@@ -72,6 +72,8 @@ class FeatureEngineer:
         df = self._add_volume_features(df)
         df = self._add_fno_features(df)
         df = self._add_macro_sentiment_features(df)
+        df = self._add_sentiment_trends_features(df)
+        df = self._add_deals_features(df)
         df = self._add_derived_features(df)
         df = self._add_pcr_dynamics(df)
         df = self._add_regime_features(df)
@@ -88,7 +90,12 @@ class FeatureEngineer:
         feature_cols = [c for c in df.columns if c not in
                         ["DATE", "SYMBOL", "EXPIRY_DT", "INSTRUMENT",
                          "OPTION_TYP", "TIMESTAMP", "NEAR_EXPIRY"]]
-        logger.debug(f"Features computed: {len(feature_cols)} columns")
+
+        # Final cleanup: handle inf and NaN
+        df = df.replace([np.inf, -np.inf], np.nan)
+        df = df.fillna(0)
+
+        logger.info(f"Features computed: {len(feature_cols)} columns")
         return df
 
     # ─────────────────────────────────────────────────────────────────────
@@ -130,7 +137,7 @@ class FeatureEngineer:
                 df["dmn"]  = adx_df.get("DMN_14", np.nan)  # -DI
                 df["di_diff"] = df["dmp"] - df["dmn"]
         else:
-            df["adx"] = self._manual_adx(h, lo, c, 14)
+            df["adx_14"] = self._manual_adx(h, lo, c, 14)
 
         # ── Supertrend ────────────────────────────────────────────────────
         if PANDAS_TA_AVAILABLE:
@@ -439,10 +446,41 @@ class FeatureEngineer:
         if "GOLD_CLOSE" in df.columns:
             df["gold_1d_ret"] = df["GOLD_CLOSE"].pct_change(1) * 100
             df["gold_5d_ret"] = df["GOLD_CLOSE"].pct_change(5) * 100
-
         if "CRUDE_CLOSE" in df.columns:
             df["crude_1d_ret"] = df["CRUDE_CLOSE"].pct_change(1) * 100
             df["crude_5d_ret"] = df["CRUDE_CLOSE"].pct_change(5) * 100
+
+        return df
+
+    def _add_sentiment_trends_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Process merged sentiment and trends columns."""
+        # Sentiment from announcements
+        if "sentiment_score" in df.columns:
+            df["sentiment_5d_avg"] = df["sentiment_score"].rolling(5).mean()
+            df["sentiment_trend"] = df["sentiment_score"] - df["sentiment_5d_avg"]
+            
+        # Trends (Google Trends keywords)
+        trends_keywords = ["crash", "market", "nifty", "buy", "rally"]
+        trends_cols = [c for c in df.columns if any(kw in c.lower() for kw in trends_keywords)]
+        for col in trends_cols:
+             if col in df.columns:
+                 df[f"{col}_delta"] = df[col].diff()
+                 df[f"{col}_zscore"] = (df[col] - df[col].rolling(20).mean()) / (df[col].rolling(20).std() + 1e-9)
+                 
+        return df
+
+    def _add_deals_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Process merged bulk/block deals columns."""
+        if "NET_BULK_QTY" in df.columns:
+            # Volume relative to trading volume
+            if VOL_COL in df.columns and VOL_COL in df:
+                # Note: VOL_COL is CONTRACTS in this file
+                df["bulk_to_vol_ratio"] = df["NET_BULK_QTY"] / (df[VOL_COL] + 1e-9)
+            
+            df["bulk_deal_intensity"] = (df["NET_BULK_QTY"] / df["NET_BULK_QTY"].rolling(20).std().replace(0, 1)).fillna(0)
+            df["bulk_deal_sign"] = np.sign(df["NET_BULK_QTY"])
+            
+        return df
 
         # ── India VIX features (if not already in volatility section) ─────
         if "VIX_CLOSE" in df.columns and "vix_rank" not in df.columns:
@@ -720,7 +758,7 @@ class FeatureEngineer:
         c = df["CLOSE"]
 
         # Velocity: Rate of price change (first derivative)
-        for p in [1, 3, 5, 10]:
+        for p in [1, 3, 5, 10, 20]:
             df[f"velocity_{p}d"] = c.diff(p) / p
 
         # Acceleration: Rate of velocity change (second derivative)
@@ -772,6 +810,7 @@ class FeatureEngineer:
 
         # 3-class encoded for softmax: 0=DOWN, 1=FLAT, 2=UP
         df["label_3c"] = df["label"] + 1
+        df["target"] = df["label_3c"]
 
         return df
 
@@ -817,8 +856,8 @@ class FeatureEngineer:
         macro_raw = [c for c in df.columns if any(
             c.startswith(p) for p in
             ["NIFTY_", "BANKNIFTY_", "SPX_", "NDX_", "USDINR_",
-             "GOLD_", "CRUDE_", "MIDCAP_", "VIX_"]
-        )]
+             "GOLD_", "CRUDE_", "MIDCAP_", "VIX_", "BRENT_", "DXY_"]
+        ) and any(c.endswith(suffix) for suffix in ["_CLOSE", "_VOL", "_OPEN", "_HIGH", "_LOW"])]
         skip.update(macro_raw)
         return [c for c in df.columns if c not in skip]
 

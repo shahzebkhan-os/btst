@@ -18,9 +18,9 @@ LOG_DIR          = BASE_DIR / "logs"
 # ── Data ──────────────────────────────────────────────────────────────────────
 SYMBOLS           = ["NIFTY", "BANKNIFTY"]
 TRAIN_START_DATE  = "2020-01-01"
-TRAIN_END_DATE    = "2023-12-31"
-VAL_START_DATE    = "2024-01-01"
-VAL_END_DATE      = "2024-12-31"
+TRAIN_END_DATE    = "2025-12-31"
+VAL_START_DATE    = "2026-01-01"
+VAL_END_DATE      = "2026-03-31"
 
 # ── Feature Engineering ───────────────────────────────────────────────────────
 LOOKBACK_WINDOW   = 20     # trading days of history per sample

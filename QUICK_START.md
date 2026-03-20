@@ -13,8 +13,8 @@ pip install jugaad-data nsefin nsepython
 
 ### Download All Data (Recommended)
 ```bash
-# Download all data for last 2 years
-python data_downloader.py --all
+# Download all data from 2020 to present
+python3 data_downloader.py --all
 
 # Download all data with custom date range
 python data_downloader.py --all --start-date 2022-01-01 --end-date 2024-12-31
@@ -34,8 +34,8 @@ python data_downloader.py --vix
 # FII/DII Flows only
 python data_downloader.py --fii-dii
 
-# Combine multiple types
-python data_downloader.py --bhavcopy --vix --fii-dii
+# Global signals (Extended Market Data)
+python3 market_data_extended.py --start-date 2020-01-01 --force-refresh
 ```
 
 ### Information Commands

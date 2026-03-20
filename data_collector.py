@@ -22,6 +22,7 @@ import warnings
 import datetime as dt
 from pathlib import Path
 from typing import Optional, List, Dict, Tuple
+from tqdm import tqdm
 
 import numpy as np
 import pandas as pd
@@ -114,7 +115,6 @@ class DataCollector:
         logger.info("NSE session initialized")
         return session
 
-    # ─── 1. F&O BHAVCOPY ──────────────────────────────────────────────────────
     def load_bhavcopy_range(
         self,
         start_date: str,
@@ -122,39 +122,61 @@ class DataCollector:
         symbols: Optional[List[str]] = None,
     ) -> pd.DataFrame:
         """
-        Load NSE F&O Bhavcopy CSV files for a date range.
-
-        File naming convention:  fo{DDMMYYYY}bhav.csv
-        Download from:  https://www.nseindia.com/reports-archives-fo
-
-        Args:
-            start_date: "YYYY-MM-DD"
-            end_date:   "YYYY-MM-DD"
-            symbols:    Optional filter, e.g. ["NIFTY", "BANKNIFTY"]
-
-        Returns:
-            DataFrame with all F&O contract data for the date range.
+        Load NSE F&O Bhavcopy CSV files for a date range in parallel.
         """
+        import concurrent.futures
+
         start = pd.to_datetime(start_date)
         end = pd.to_datetime(end_date)
+        dates = pd.date_range(start, end)
 
-        frames = []
-        date = start
+        paths_to_load = []
         missing = []
 
-        while date <= end:
-            fname = self.bhavcopy_dir / f"fo{date.strftime('%d%m%Y')}bhav.csv"
-            if fname.exists():
-                try:
-                    df = pd.read_csv(fname)
-                    df = self._clean_bhavcopy(df, date)
-                    frames.append(df)
-                except Exception as e:
-                    logger.warning(f"Failed to parse {fname}: {e}")
-            else:
-                if date.weekday() < 5:   # only flag weekdays
-                    missing.append(date.strftime("%d-%m-%Y"))
-            date += pd.Timedelta(days=1)
+        # 1. Identify files
+        for date in dates:
+            formats = [
+                f"fo{date.strftime('%d%m%Y')}bhav.csv",
+                f"fo{date.strftime('%d%b%Y').upper()}bhav.csv",
+                f"fo{date.strftime('%d%b%Y')}bhav.csv",
+                f"fo{date.strftime('%d-%m-%Y')}bhav.csv",
+            ]
+            
+            fname = None
+            for fmt in formats:
+                test_path = self.bhavcopy_dir / fmt
+                if test_path.exists():
+                    fname = test_path
+                    break
+                test_path_nested = self.bhavcopy_dir / "bhavcopies" / fmt
+                if test_path_nested.exists():
+                    fname = test_path_nested
+                    break
+
+            if fname:
+                paths_to_load.append((fname, date))
+            elif date.weekday() < 5:
+                missing.append(date.strftime("%d-%m-%Y"))
+
+        # 2. Parallel read and parse
+        def _read_file(args):
+            path, dt_date = args
+            try:
+                df = pd.read_csv(path, low_memory=False)
+                df = self._clean_bhavcopy(df, dt_date)
+                df = df.dropna(subset=["CLOSE"])
+                return df if not df.empty else None
+            except Exception as e:
+                logger.warning(f"Failed to parse {path.name}: {e}")
+                return None
+
+        frames = []
+        if paths_to_load:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
+                results = list(tqdm(executor.map(_read_file, paths_to_load), 
+                                    total=len(paths_to_load), 
+                                    desc="Loading bhavcopies", unit="day"))
+            frames = [df for df in results if df is not None]
 
         if missing:
             logger.warning(f"Missing bhavcopy files ({len(missing)}): {missing[:5]}...")
@@ -179,23 +201,40 @@ class DataCollector:
         """Standardise column names and dtypes for a single bhavcopy file."""
         # Normalise column names (NSE changes these occasionally)
         col_map = {
-            "INSTRUMENT": "INSTRUMENT",
+            # Legacy Format
             "SYMBOL":     "SYMBOL",
-            "EXPIRY_DT":  "EXPIRY_DT",
-            "STRIKE_PR":  "STRIKE_PR",
-            "OPTION_TYP": "OPTION_TYP",
+            "CLOSE":      "CLOSE",
             "OPEN":       "OPEN",
             "HIGH":       "HIGH",
             "LOW":        "LOW",
-            "CLOSE":      "CLOSE",
+            "OPEN_INT":   "OPEN_INT",
+            "CHG_IN_OI":  "CHG_IN_OI",
+            "STRIKE_PR":  "STRIKE_PR",
+            "OPTION_TYP": "OPTION_TYP",
+            "EXPIRY_DT":  "EXPIRY_DT",
+            # New Format (effective late 2024/2025)
+            "TckrSymb":   "SYMBOL",
+            "ClsPric":    "CLOSE",
+            "OpnPric":    "OPEN",
+            "HghPric":    "HIGH",
+            "LwPric":     "LOW",
+            "OpnIntrst":  "OPEN_INT",
+            "ChngInOpnIntrst": "CHG_IN_OI",
+            "StrkPric":   "STRIKE_PR",
+            "OptnTp":     "OPTION_TYP",
+            "XpryDt":     "EXPIRY_DT",
+            "TtlTradgVol": "CONTRACTS",
+            "TtlTrfVal":  "VAL_INLAKH",
+            "SttlmPric":  "SETTLE_PR",
+            "INSTRUMENT": "INSTRUMENT",
+            "STRIKE_PR":  "STRIKE_PR",
+            "OPTION_TYP": "OPTION_TYP",
             "SETTLE_PR":  "SETTLE_PR",
             "CONTRACTS":  "CONTRACTS",
             "VAL_INLAKH": "VAL_INLAKH",
-            "OPEN_INT":   "OPEN_INT",
-            "CHG_IN_OI":  "CHG_IN_OI",
             "TIMESTAMP":  "TIMESTAMP",
         }
-        df = df.rename(columns={c: col_map.get(c, c) for c in df.columns})
+        df = df.rename(columns={c: col_map.get(c.strip(), c.strip()) for c in df.columns})
 
         # Add trading date
         df["DATE"] = pd.to_datetime(date).normalize()
@@ -205,14 +244,14 @@ class DataCollector:
             df["EXPIRY_DT"] = pd.to_datetime(df["EXPIRY_DT"], format="%d-%b-%Y",
                                               errors="coerce")
 
-        # Numeric coercion
-        for col in ["OPEN", "HIGH", "LOW", "CLOSE", "SETTLE_PR",
-                    "CONTRACTS", "VAL_INLAKH", "OPEN_INT", "CHG_IN_OI", "STRIKE_PR"]:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
-
         # Drop rows where no price data
         df = df.dropna(subset=["CLOSE"])
+
+        # Strict column filtering: Only keep what we mapped + standard metadata
+        keep_cols = list(set(col_map.values())) + ["DATE"]
+        df = df[[c for c in keep_cols if c in df.columns]]
+
+        return df
 
         # Compute DTE
         df["DTE"] = (df["EXPIRY_DT"] - df["DATE"]).dt.days.clip(lower=0)
@@ -420,7 +459,7 @@ class DataCollector:
             lo = col.strip().lower()
             if "date" in lo:
                 col_map[col] = "DATE"
-            elif lo in ("close", "eod_price"):
+            elif lo in ("close", "eod_price", "vix_close", "vix"):
                 col_map[col] = "VIX_CLOSE"
             elif lo == "open":
                 col_map[col] = "VIX_OPEN"
@@ -457,6 +496,28 @@ class DataCollector:
             df = self._clean_fii_df(df)
             logger.info(f"FII/DII loaded from local CSV: {len(df)} rows")
             return df
+            
+        logger.error("Could not load FII/DII data.")
+        return pd.DataFrame()
+
+    # ─── 5. EXTENDED MARKET DATA (Global Signals) ──────────────────────────
+    def load_extended_market_data(self) -> pd.DataFrame:
+        """
+        Load global market signals (risk, sentiment, macro) from processed cache.
+        These are generated via market_data_extended.py.
+        """
+        cache_path = Path("data/extended/market_data_extended.parquet")
+        if cache_path.exists():
+            df = pd.read_parquet(cache_path)
+            # Ensure DATE is in datetime format and is a column, not index
+            if df.index.name == "DATE":
+                df = df.reset_index()
+            df["DATE"] = pd.to_datetime(df["DATE"]).dt.normalize()
+            logger.info(f"Extended market data loaded: {len(df)} rows")
+            return df
+        else:
+            logger.warning("Extended market data cache not found. Run market_data_extended.py first.")
+            return pd.DataFrame()
 
         # NSE direct API
         try:
@@ -533,16 +594,9 @@ class DataCollector:
           USDINR=X     = USD-INR
         """
         if tickers is None:
-            tickers = {
-                "^NSEI":    "NIFTY",
-                "^NSEBANK": "BANKNIFTY",
-                "^NSMIDCP": "MIDCAP",
-                "INR=X":    "USDINR",
-                "GC=F":     "GOLD",
-                "CL=F":     "CRUDE",
-                "^GSPC":    "SPX",
-                "^NDX":     "NDX",
-            }
+            # We skip downloading these as market_data_extended.parquet
+            # already covers NIFTY, BANKNIFTY, and MIDCAP natively.
+            tickers = {}
 
         frames = []
         for ticker, name in tickers.items():
@@ -905,10 +959,71 @@ class DataCollector:
 
         return float(max_pain_strike)
 
+    def load_option_chain_history(self) -> pd.DataFrame:
+        """
+        Aggregate and load historical option chain data from data/option_chain/*.csv.
+        Returns a daily average of PCR and Max Pain per symbol.
+        """
+        path = Path("data/option_chain")
+        if not path.exists():
+            return pd.DataFrame()
+            
+        all_data = []
+        files = list(path.glob("*.csv"))
+        if not files:
+            return pd.DataFrame()
+            
+        logger.info(f"Processing {len(files)} historical option chain files...")
+        for f in tqdm(files, desc="Parsing Option Chain data", unit="file"):
+            try:
+                # Format could be symbol_YYYYMMDD_HHMM.csv OR symbol_expiry_YYYYMMDD_HHMM.csv
+                parts = f.stem.split("_")
+                if len(parts) < 2: continue
+                
+                symbol = parts[0].upper()
+                if symbol == "NIFTY": symbol = "NIFTY"
+                elif symbol == "BANKNIFTY": symbol = "BANKNIFTY"
+                
+                # The date is usually the 2nd to last part if HHMM is last, or last part if YYYYMMDD is last
+                # Let's look for an 8-digit part
+                date_str = None
+                for p in parts:
+                    if len(p) == 8 and p.isdigit():
+                        date_str = p
+                        break
+                
+                if not date_str: continue
+                date = pd.to_datetime(date_str, format="%Y%m%d").normalize()
+                
+                df = pd.read_csv(f)
+                if all(c in df.columns for c in ["CE_OI", "PE_OI", "STRIKE"]):
+                    pcr = df["PE_OI"].sum() / (df["CE_OI"].sum() + 1e-9)
+                    max_pain = self._compute_max_pain(df)
+                    all_data.append({
+                        "DATE": date,
+                        "SYMBOL": symbol,
+                        "pcr_full": pcr,
+                        "max_pain": max_pain
+                    })
+            except Exception:
+                continue
+                
+        if not all_data:
+            return pd.DataFrame()
+            
+        df_oc = pd.DataFrame(all_data)
+        # Aggregate by day
+        df_oc = df_oc.groupby(["DATE", "SYMBOL"]).agg({
+            "pcr_full": "mean",
+            "max_pain": "mean"
+        }).reset_index()
+        
+        return df_oc
+
     # ─── 8. MASTER MERGE ──────────────────────────────────────────────────────
     def get_full_dataset(
         self,
-        start_date: str = "2021-01-01",
+        start_date: str = "2018-01-01",
         end_date: Optional[str] = None,
         symbols: Optional[List[str]] = None,
     ) -> pd.DataFrame:
@@ -936,6 +1051,7 @@ class DataCollector:
         deals = self.get_bulk_block_deals()
         sentiment = self.get_nse_announcements_sentiment()
         trends = self.get_google_trends_proxy()
+        oc_hist = self.load_option_chain_history()
 
         if bhav.empty:
             logger.error("Bhavcopy data is empty — cannot build dataset.")
@@ -963,12 +1079,27 @@ class DataCollector:
             
         if not trends.empty:
             df = df.merge(trends, on="DATE", how="left")
+            
+        if not oc_hist.empty:
+            df = df.merge(oc_hist, on=["DATE", "SYMBOL"], how="left")
+            logger.info(f"Merged Option Chain history: {len(oc_hist)} rows")
+
+        # ── 9. EXTENDED MARKET DATA MERGE ──
+        extended = self.load_extended_market_data()
+        ext_cols = []
+        if not extended.empty:
+            df = df.merge(extended, on="DATE", how="left")
+            ext_cols = [c for c in extended.columns if c != "DATE"]
+            logger.info(f"Merged {len(extended.columns)-1} extended global signals")
 
         # Forward-fill macro data for non-trading days
         macro_cols = [c for c in df.columns
                       if any(c.startswith(p) for p in
                              ["VIX", "FII", "DII", "NIFTY_", "BANKNIFTY_",
-                              "SPX_", "NDX_", "USDINR_", "GOLD_", "CRUDE_"])]
+                              "SPX_", "NDX_", "USDINR_", "GOLD_", "CRUDE_",
+                              "RISK_", "DXY", "BRENT", "WTI", "US10Y"])]
+        macro_cols = list(set(macro_cols + ext_cols))
+        
         df[macro_cols] = df.groupby("SYMBOL")[macro_cols].ffill()
 
         df = df.sort_values(["DATE", "SYMBOL"]).reset_index(drop=True)

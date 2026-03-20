@@ -171,8 +171,21 @@ def curriculum_train(model, X_train, y_train, feature_df) -> Any:
     # model.train(X_easy, y_easy, epochs=20)
     
     logger.info("Curriculum Training: Phase 2 (All examples)...")
-    # Train Phase 2 with lower LR (0.3x)
-    # model.train(X_train, y_train, learning_rate=initial_lr * 0.3)
+    # Actually fit the ensemble model
+    # We use a simple train/val split for the internal calibration
+    split_idx = int(0.8 * len(feature_df))
+    df_train = feature_df.iloc[:split_idx]
+    df_val   = feature_df.iloc[split_idx:]
+    
+    # Use label_3c or target as y
+    target_col = "target" if "target" in feature_df.columns else "label_3c"
+    
+    model.fit(
+        df_train, 
+        df_train[target_col],
+        df_val,
+        df_val[target_col]
+    )
     return model
 
 def snapshot_ensemble_train(model, X_train, y_train, n_snapshots=5) -> List[Any]:

@@ -24,6 +24,7 @@ Event flags via hard-coded calendar (updated quarterly).
 import logging
 import datetime as dt
 from pathlib import Path
+from tqdm import tqdm
 from typing import Optional, Dict, List
 
 import numpy as np
@@ -131,12 +132,12 @@ TICKERS: Dict[str, str] = {
 # ─── INDIA MACRO EVENT CALENDAR ───────────────────────────────────────────────
 # Update quarterly. Format: "YYYY-MM-DD": "event_name"
 INDIA_EVENTS: Dict[str, str] = {
-    # RBI MPC meetings (typically 8 per year)
+    # RBI MPC meetings
     "2024-02-08": "RBI_MPC", "2024-04-05": "RBI_MPC", "2024-06-07": "RBI_MPC",
     "2024-08-08": "RBI_MPC", "2024-10-09": "RBI_MPC", "2024-12-06": "RBI_MPC",
     "2025-02-07": "RBI_MPC", "2025-04-09": "RBI_MPC", "2025-06-06": "RBI_MPC",
-    "2025-08-07": "RBI_MPC", "2025-10-08": "RBI_MPC", "2025-12-05": "RBI_MPC",
-    "2026-02-06": "RBI_MPC", "2026-04-03": "RBI_MPC",
+    "2025-08-07": "RBI_MPC", "2025-10-01": "RBI_MPC", "2025-12-05": "RBI_MPC",
+    "2026-02-06": "RBI_MPC", "2026-04-08": "RBI_MPC", "2026-06-05": "RBI_MPC",
     # Union Budget
     "2024-02-01": "UNION_BUDGET", "2024-07-23": "UNION_BUDGET_FULL",
     "2025-02-01": "UNION_BUDGET", "2026-02-01": "UNION_BUDGET",
@@ -147,22 +148,24 @@ INDIA_EVENTS: Dict[str, str] = {
     "2025-01-29": "US_FOMC", "2025-03-19": "US_FOMC", "2025-05-07": "US_FOMC",
     "2025-06-18": "US_FOMC", "2025-07-30": "US_FOMC", "2025-09-17": "US_FOMC",
     "2025-11-05": "US_FOMC", "2025-12-17": "US_FOMC",
-    "2026-01-28": "US_FOMC", "2026-03-18": "US_FOMC",
+    "2026-01-28": "US_FOMC", "2026-03-18": "US_FOMC", "2026-04-29": "US_FOMC",
+    "2026-06-17": "US_FOMC", "2026-07-29": "US_FOMC", "2026-09-16": "US_FOMC",
+    "2026-10-28": "US_FOMC", "2026-12-09": "US_FOMC",
     # India General Elections / Major Events
     "2024-06-04": "INDIA_ELECTION_RESULT",
-    # US CPI releases (high-impact for global risk)
-    # India CPI releases (2nd week of month, Wednesday)
 }
 
-# NSE Weekly expiry: every Thursday
-# NSE Monthly expiry: last Thursday of month
-NSE_MONTHLY_EXPIRY_2024_25 = [
+# NSE Monthly expiry: last Tuesday of month (shifted from Thursday in Sept 2025)
+NSE_MONTHLY_EXPIRY = [
     "2024-01-25","2024-02-29","2024-03-28","2024-04-25","2024-05-30",
     "2024-06-27","2024-07-25","2024-08-29","2024-09-26","2024-10-31",
     "2024-11-28","2024-12-26","2025-01-30","2025-02-27","2025-03-27",
     "2025-04-24","2025-05-29","2025-06-26","2025-07-31","2025-08-28",
-    "2025-09-25","2025-10-30","2025-11-27","2025-12-25",
-    "2026-01-29","2026-02-26","2026-03-26",
+    # September 2025 onwards: Last Tuesday
+    "2025-09-30","2025-10-28","2025-11-25","2025-12-30",
+    "2026-01-27","2026-02-24","2026-03-31","2026-04-28","2026-05-26",
+    "2026-06-30","2026-07-28","2026-08-25","2026-09-29","2026-10-27",
+    "2026-11-24","2026-12-29",
 ]
 
 
@@ -173,7 +176,7 @@ class MarketDataExtended:
     Produces a date-indexed DataFrame ready to merge into the main feature set.
     """
 
-    def __init__(self, cache_dir: str = "data/extended", start_date: str = "2019-01-01"):
+    def __init__(self, cache_dir: str = "data/extended", start_date: str = "2018-01-01"):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.start_date = start_date
@@ -200,7 +203,7 @@ class MarketDataExtended:
         ticker_list = list(TICKERS.keys())
         frames = []
 
-        for i in range(0, len(ticker_list), batch_size):
+        for i in tqdm(range(0, len(ticker_list), batch_size), desc="Fetching market batches", unit="batch"):
             batch = ticker_list[i:i + batch_size]
             try:
                 raw = yf.download(
@@ -209,6 +212,7 @@ class MarketDataExtended:
                     progress=False,
                     auto_adjust=True,
                     group_by="ticker",
+                    threads=False,
                 )
                 df_batch = self._extract_close_series(raw, batch)
                 frames.append(df_batch)
@@ -249,6 +253,8 @@ class MarketDataExtended:
 
     def _extract_close_series(self, raw: pd.DataFrame, tickers: list) -> pd.DataFrame:
         """Extract Close prices from multi-ticker yfinance download."""
+        if raw is None or raw.empty:
+            return pd.DataFrame()
         result = pd.DataFrame(index=raw.index)
 
         if isinstance(raw.columns, pd.MultiIndex):
@@ -275,12 +281,12 @@ class MarketDataExtended:
     def _download_individually(self, tickers: list) -> pd.DataFrame:
         """Fallback: download one ticker at a time."""
         result = pd.DataFrame()
-        for ticker in tickers:
+        for ticker in tqdm(tickers, desc="Fallback Downloads", leave=False, unit="ticker"):
             name = TICKERS.get(ticker, ticker)
             try:
                 raw = yf.download(ticker, start=self.start_date,
-                                  progress=False, auto_adjust=True)
-                if not raw.empty:
+                                  progress=False, auto_adjust=True, threads=False)
+                if raw is not None and not raw.empty:
                     s = raw["Close"].rename(f"{name}_CLOSE")
                     result = result.join(s, how="outer") if not result.empty else s.to_frame()
             except Exception as e:
@@ -515,13 +521,18 @@ class MarketDataExtended:
             c[flag] = c[src].shift(-1).fillna(0).astype(int)
 
         # F&O monthly expiry flags
-        monthly_exp = pd.to_datetime(NSE_MONTHLY_EXPIRY_2024_25)
+        monthly_exp = pd.to_datetime(NSE_MONTHLY_EXPIRY)
         c["IS_MONTHLY_EXPIRY"]  = c.index.isin(monthly_exp).astype(int)
         c["PRE_MONTHLY_EXPIRY"] = c["IS_MONTHLY_EXPIRY"].shift(-1).fillna(0).astype(int)
         c["POST_MONTHLY_EXPIRY"]= c["IS_MONTHLY_EXPIRY"].shift(1).fillna(0).astype(int)
 
-        # Weekly expiry: every Thursday (weekday == 3)
-        c["IS_WEEKLY_EXPIRY"]  = (pd.to_datetime(c.index).dayofweek == 3).astype(int)
+        # Weekly expiry logic (Thursday until Sept 2025, then Tuesday)
+        dates = pd.to_datetime(c.index)
+        is_pre_sep_2025 = dates < pd.Timestamp("2025-09-01")
+        
+        # Thursday = 3, Tuesday = 1
+        weekly_exp = np.where(is_pre_sep_2025, dates.dayofweek == 3, dates.dayofweek == 1)
+        c["IS_WEEKLY_EXPIRY"]  = weekly_exp.astype(int)
         c["PRE_WEEKLY_EXPIRY"] = c["IS_WEEKLY_EXPIRY"].shift(-1).fillna(0).astype(int)
 
         # India result season (April-May, October-November)
@@ -642,13 +653,19 @@ class MarketDataExtended:
 
 # ─── CLI test ──────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    import argparse
     import warnings
     warnings.filterwarnings("ignore")
 
-    print("\n=== EXTENDED MARKET DATA TEST ===\n")
-    emd = MarketDataExtended(start_date="2023-01-01")
+    parser = argparse.ArgumentParser(description="Extended Market Data Test")
+    parser.add_argument("--start-date", type=str, default="2020-01-01", help="Start date (YYYY-MM-DD)")
+    parser.add_argument("--force-refresh", action="store_true", help="Force re-download")
+    args = parser.parse_args()
 
-    df = emd.download_all(force_refresh=True)
+    print(f"\n=== EXTENDED MARKET DATA TEST (Start: {args.start_date}) ===\n")
+    emd = MarketDataExtended(start_date=args.start_date)
+
+    df = emd.download_all(force_refresh=args.force_refresh)
     print(f"✓ Shape: {df.shape}")
     print(f"✓ Date range: {df.index.min().date()} → {df.index.max().date()}")
 

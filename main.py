@@ -19,9 +19,27 @@ Usage:
 
 import argparse
 import logging
+from typing import Optional
 import datetime as dt
 from pathlib import Path
 import sys
+from tqdm import tqdm
+
+# --- Compatibility Patch for pytorch-forecasting metadata bug ---
+import importlib.metadata
+_orig_version = importlib.metadata.version
+def _patched_version(name):
+    """Fallback for hyphen/dot naming mismatches (e.g. zope.interface vs zope-interface)"""
+    try:
+        return _orig_version(name)
+    except importlib.metadata.PackageNotFoundError:
+        alt_name = name.replace(".", "-") if "." in name else name.replace("-", ".")
+        try:
+            return _orig_version(alt_name)
+        except importlib.metadata.PackageNotFoundError:
+            raise importlib.metadata.PackageNotFoundError(name)
+importlib.metadata.version = _patched_version
+# -------------------------------------------------------------
 
 import pandas as pd
 import numpy as np
@@ -33,7 +51,7 @@ from training_pipeline import TrainingPipeline
 from prediction_pipeline import PredictionPipeline, schedule_daily_prediction
 from calibration import CalibrationManager
 from position_sizing import PositionSizingManager
-from explainability import ExplainabilityManager
+from explainability import ModelExplainer
 from drift_detection import DriftDetectionManager
 import config
 
@@ -56,6 +74,8 @@ logger = logging.getLogger("Main")
 def train_model(
     optimize: bool = False,
     use_walk_forward: bool = True,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
 ) -> None:
     """
     Train ensemble model from scratch.
@@ -72,20 +92,27 @@ def train_model(
     logger.info("Step 1: Collecting data...")
     collector = DataCollector()
     df = collector.get_full_dataset(
-        start_date=config.TRAIN_START_DATE,
-        end_date=config.VAL_END_DATE,
+        start_date=start_date or config.TRAIN_START_DATE,
+        end_date=end_date or config.VAL_END_DATE,
         symbols=config.SYMBOLS,
     )
     logger.info(f"Collected {len(df)} rows")
+
+    if df.empty:
+        logger.error("DataCollector returned an empty dataset. Check your date ranges and data directories.")
+        return
 
     # Step 2: Engineer features
     logger.info("Step 2: Engineering features...")
     engineer = FeatureEngineer()
     df_list = []
-    for symbol in df["SYMBOL"].unique():
+    
+    unique_symbols = df["SYMBOL"].unique()
+    for symbol in tqdm(unique_symbols, desc="Engineering features", unit="symbol"):
         df_symbol = df[df["SYMBOL"] == symbol].copy()
         df_symbol = engineer.compute_all(df_symbol)
         df_list.append(df_symbol)
+    
     df_features = pd.concat(df_list, ignore_index=True)
     logger.info(f"Features computed: {len(df_features.columns)} columns")
 
@@ -93,7 +120,7 @@ def train_model(
     logger.info("Step 3: Adding global market features...")
     try:
         market_data = MarketDataExtended()
-        df_global = market_data.get_all_signals()
+        df_global = market_data.download_all()
         df_features = df_features.merge(df_global, on="DATE", how="left")
     except Exception as e:
         logger.warning(f"Could not fetch global features: {e}")
@@ -273,11 +300,27 @@ Examples:
         help="Check for drift and retrain if needed (full mode only)",
     )
 
+    parser.add_argument(
+        "--start-date",
+        type=str,
+        help="Start date for training (YYYY-MM-DD)",
+    )
+
+    parser.add_argument(
+        "--end-date",
+        type=str,
+        help="End date for training (YYYY-MM-DD)",
+    )
+
     args = parser.parse_args()
 
     try:
         if args.mode == "train":
-            train_model(optimize=args.optimize)
+            train_model(
+                optimize=args.optimize,
+                start_date=args.start_date,
+                end_date=args.end_date
+            )
 
         elif args.mode == "predict":
             predict_signals()

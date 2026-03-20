@@ -87,6 +87,20 @@ except ImportError:
 
 # Known NSE Holidays for 2023 & 2024
 NSE_HOLIDAYS = {
+    # 2020
+    date(2020, 2, 21), date(2020, 3, 10), date(2020, 4, 2), date(2020, 4, 6),
+    date(2020, 4, 10), date(2020, 4, 14), date(2020, 5, 1), date(2020, 5, 25),
+    date(2020, 10, 2), date(2020, 11, 16), date(2020, 11, 30), date(2020, 12, 25),
+    # 2021
+    date(2021, 1, 26), date(2021, 3, 11), date(2021, 3, 29), date(2021, 4, 2),
+    date(2021, 4, 14), date(2021, 4, 21), date(2021, 5, 13), date(2021, 7, 21),
+    date(2021, 8, 19), date(2021, 9, 10), date(2021, 10, 15), date(2021, 11, 4),
+    date(2021, 11, 5), date(2021, 11, 19),
+    # 2022
+    date(2022, 1, 26), date(2022, 3, 1), date(2022, 3, 18), date(2022, 4, 14),
+    date(2022, 4, 15), date(2022, 5, 3), date(2022, 8, 9), date(2022, 8, 15),
+    date(2022, 8, 31), date(2022, 10, 5), date(2022, 10, 24), date(2022, 10, 26),
+    date(2022, 11, 8),
     # 2023
     date(2023, 1, 26), date(2023, 3, 7), date(2023, 3, 30), date(2023, 4, 4),
     date(2023, 4, 7), date(2023, 4, 14), date(2023, 5, 1), date(2023, 6, 28),
@@ -359,30 +373,93 @@ def load_kaggle_csv(file_path: str) -> pd.DataFrame:
     df["ltp"] = df["close"].where(df["close"] > 0, df["settle_price"])
     return df
 
-def merge_data_sources(bhavcopy_dir: str, kaggle_files: list, symbols: list) -> pd.DataFrame:
-    dfs = []
-    # Kaggle
+def merge_data_sources(
+    bhavcopy_dir: str,
+    kaggle_files: list,
+    symbols: list,
+    start_date: str = None,
+    end_date: str = None,
+) -> pd.DataFrame:
+    """Memory-efficient merge of Bhavcopy CSVs.
+    
+    Reads files in batches of 30 to avoid OOM. Filters by symbol and optional
+    date range immediately after each batch read, then concatenates only the
+    filtered frames.
+    """
+    # Essential columns only — keep RAM footprint small
+    KEEP_COLS = [
+        "trade_date", "symbol", "expiry_date", "strike",
+        "opt_type", "open", "high", "low", "close",
+        "settle_price", "volume", "open_interest", "chg_in_oi", "ltp"
+    ]
+
+    symbols_set = set(symbols)
+    result_chunks: list = []
+
+    def _process_df(df: pd.DataFrame) -> pd.DataFrame:
+        if df.empty:
+            return df
+        df = df[df["symbol"].isin(symbols_set)].copy()
+        if start_date and "trade_date" in df.columns:
+            df = df[df["trade_date"] >= start_date]
+        if end_date and "trade_date" in df.columns:
+            df = df[df["trade_date"] <= end_date]
+        # Keep only columns that exist in the frame
+        return df[[c for c in KEEP_COLS if c in df.columns]]
+
+    # ── Kaggle files ──────────────────────────────────────────────────────────
     for kf in kaggle_files:
         if os.path.exists(kf):
-            dfs.append(load_kaggle_csv(kf))
+            try:
+                df = load_kaggle_csv(kf)
+                result_chunks.append(_process_df(df))
+                del df
+            except Exception as e:
+                logger.warning(f"Kaggle file {kf} error: {e}")
 
-    # Bhavcopies
+    # ── Bhavcopy files — streamed in batches of 30 ───────────────────────────
+    all_csv_paths = []
     for root, _, files in os.walk(bhavcopy_dir):
         for f in files:
             if f.endswith(".csv"):
-                df = load_kaggle_csv(os.path.join(root, f))
-                dfs.append(df)
+                all_csv_paths.append(os.path.join(root, f))
+    all_csv_paths.sort()  # chronological order
 
-    if not dfs:
+    BATCH = 30
+    total_files = len(all_csv_paths)
+    for batch_start in range(0, total_files, BATCH):
+        batch = all_csv_paths[batch_start: batch_start + BATCH]
+        batch_dfs = []
+        for path in batch:
+            try:
+                df = load_kaggle_csv(path)
+                batch_dfs.append(_process_df(df))
+                del df
+            except Exception as e:
+                logger.warning(f"Bhavcopy {os.path.basename(path)} error: {e}")
+        if batch_dfs:
+            combined = pd.concat(batch_dfs, ignore_index=True)
+            result_chunks.append(combined)
+            del batch_dfs, combined
+
+        pct = min(100, int((batch_start + BATCH) / max(total_files, 1) * 100))
+        sys.stdout.write(f"\r  Loading Bhavcopies: {pct}%   ")
+        sys.stdout.flush()
+
+    sys.stdout.write("\n")
+
+    if not result_chunks:
+        logger.warning("merge_data_sources: no data found for the requested date range.")
         return pd.DataFrame()
 
-    combo = pd.concat(dfs, ignore_index=True)
-    combo = combo[combo["symbol"].isin(symbols)]
-    combo = combo.drop_duplicates(subset=["trade_date", "symbol", "expiry_date", "strike", "opt_type"])
-    
-    logger.info(f"Merged {len(dfs)} data sources. Total rows after filtering: {len(combo)}")
-    return combo
+    combo = pd.concat(result_chunks, ignore_index=True)
+    del result_chunks
 
+    combo = combo.drop_duplicates(
+        subset=[c for c in ["trade_date", "symbol", "expiry_date", "strike", "opt_type"] if c in combo.columns]
+    )
+    logger.info(f"Merged {total_files} Bhavcopy files. Total rows: {len(combo)}")
+    return combo
 
 # ── STEP 2A: IV & GREEKS RECONSTRUCTION ──────────────────────────────────────
 
@@ -919,6 +996,14 @@ def load_iv_history(df: pd.DataFrame, db_path: str):
 
     cur = conn.cursor()
     cur.execute("""
+        CREATE TABLE IF NOT EXISTS iv_history (
+            symbol TEXT,
+            snap_date TEXT,
+            iv REAL,
+            PRIMARY KEY(symbol, snap_date)
+        )
+    """)
+    cur.execute("""
         INSERT OR REPLACE INTO iv_history (symbol, snap_date, iv)
         SELECT symbol, snap_date, iv FROM iv_history_temp
     """)
@@ -1067,7 +1152,9 @@ async def run_backfill_with_progress(days: int = 252, db_path: str = None):
         df = merge_data_sources(
             os.path.join(CONFIG["data_dir"], "bhavcopies"),
             [],
-            CONFIG["symbols"]
+            CONFIG["symbols"],
+            start_date=CONFIG.get("start_date"),
+            end_date=CONFIG.get("end_date"),
         )
         
         # Reconstruct features
@@ -1117,7 +1204,13 @@ if __name__ == "__main__":
 
     if args.cmd in ["process", "full"]:
         spot = download_spot_prices(syms, args.start, args.end, CONFIG["data_dir"])
-        df = merge_data_sources(os.path.join(CONFIG["data_dir"], "bhavcopies"), [args.file] if args.file else [], syms)
+        df = merge_data_sources(
+            os.path.join(CONFIG["data_dir"], "bhavcopies"),
+            [args.file] if args.file else [],
+            syms,
+            start_date=args.start,
+            end_date=args.end,
+        )
         out = reconstruct_features(df, spot)
         out.to_csv(os.path.join(CONFIG["data_dir"], "reconstructed.csv"), index=False)
 

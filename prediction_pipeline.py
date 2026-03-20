@@ -37,6 +37,7 @@ import pytz
 import numpy as np
 import pandas as pd
 import joblib
+from tqdm import tqdm
 
 from data_collector import DataCollector
 from feature_engineering import FeatureEngineer
@@ -241,7 +242,8 @@ class PredictionPipeline:
 
         # Compute features per symbol
         df_list = []
-        for symbol in df["SYMBOL"].unique():
+        unique_symbols = df["SYMBOL"].unique()
+        for symbol in tqdm(unique_symbols, desc="Computing features", unit="symbol"):
             df_symbol = df[df["SYMBOL"] == symbol].copy()
             df_symbol = self.feature_engineer.compute_all(df_symbol)
             df_list.append(df_symbol)

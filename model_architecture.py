@@ -37,6 +37,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import log_loss
 from scipy.optimize import minimize
+from tqdm import tqdm
 
 import config
 from feature_engineering import FeatureEngineer
@@ -157,6 +158,11 @@ class TFTPredictor:
         # Categorical vs Real
         categoricals = ["SYMBOL", "dow", "month", "regime_composite"]
         reals = [c for c in feature_cols if c not in categoricals]
+        
+        # CRITICAL: TFT categoricals must be strings or categorified
+        for cat in categoricals:
+            if cat in df.columns:
+                df[cat] = df[cat].astype(str)
 
         if is_training:
             dataset = TimeSeriesDataSet(
@@ -236,12 +242,14 @@ class TFTPredictor:
         return trainer
 
     def predict(self, dataloader) -> Tuple[np.ndarray, np.ndarray]:
-        """Predict class probabilities and return as (N, 3) array."""
+        """Generate class and probability predictions."""
         if self.model is None:
-            raise ValueError("Model not initialized.")
-        
+            logger.error("TFT model not built.")
+            return np.zeros(0), np.zeros((0, 3))
+            
         self.model.eval()
-        raw_predictions = self.model.predict(dataloader, mode="raw", return_x=False)
+        # Ensure we use the model's own predict method which handles the TimeSeriesDataSet logic
+        raw_predictions = self.model.predict(dataloader, mode="raw", return_x=True)
         # output is (N, 1, 3) for next-day prediction
         probas = torch.softmax(raw_predictions.output, dim=-1).squeeze(1).detach().cpu().numpy()
         
@@ -332,12 +340,13 @@ class EnsemblePredictor:
         self.lgbm = lgb.LGBMClassifier(
             n_estimators=500, learning_rate=0.05, max_depth=6,
             num_leaves=63, subsample=0.8, colsample_bytree=0.7,
-            class_weight="balanced", random_state=42
+            class_weight="balanced", random_state=42, n_jobs=1,
+            verbose=-1
         )
         self.xgb = xgb.XGBClassifier(
             n_estimators=400, learning_rate=0.05, max_depth=5,
             subsample=0.8, colsample_bytree=0.7, use_label_encoder=False,
-            eval_metric="mlogloss", random_state=42
+            eval_metric="mlogloss", random_state=42, n_jobs=1
         )
         self.lr = LogisticRegression(C=0.1, max_iter=500, class_weight="balanced")
         
@@ -345,6 +354,7 @@ class EnsemblePredictor:
         self.meta = LogisticRegression(C=1.0, max_iter=200)
         self.scaler = StandardScaler()
         self.temperature = 1.0 # Default
+        self.feature_cols_ = None # Pin during fit()
         
         logger.info("EnsemblePredictor initialized with TFT, LGBM, XGB, LR and Meta-learner ✓")
 
@@ -357,59 +367,110 @@ class EnsemblePredictor:
         
         logger.info("Starting OOF generation for base models...")
         
-        # OOF Predictions Container
-        oof_preds = np.zeros((len(X_train), 3 * 4)) # 3 classes * 4 models
-        feature_cols = [c for c in X_train.columns if c not in ["DATE", "SYMBOL", "label_3c"]]
+        # Auto-detect numeric feature columns (LGBM/XGB/LR only work on numbers)
+        exclude_cols = ["label_3c", "target", "next_day_return", "DATE", "SYMBOL"]
+        feature_cols_raw  = X_train.select_dtypes(include=[np.number, bool]).columns.tolist()
+        self.feature_cols_ = [c for c in feature_cols_raw if c not in exclude_cols]
+        feature_cols = self.feature_cols_
         
-        for fold, (train_idx, val_idx) in enumerate(tscv.split(X_train)):
+        # OOF Predictions Container (LGBM, XGB, LR)
+        oof_preds = np.zeros((len(X_train), 3 * 3)) # 3 classes * 3 models
+
+        for fold, (train_idx, val_idx) in enumerate(tqdm(tscv.split(X_train), total=5, desc="Ensemble CV Folds")):
             logger.info(f"Fold {fold+1}/5 processing...")
             
             X_tr, X_va = X_train.iloc[train_idx], X_train.iloc[val_idx]
             y_tr, y_va = y_train.iloc[train_idx], y_train.iloc[val_idx]
             
+            # Ensure no NaNs before fitting models that don't handle them naturally (LR)
+            X_tr_numeric = X_tr[feature_cols].fillna(0).replace([np.inf, -np.inf], 0)
+            X_va_numeric = X_va[feature_cols].fillna(0).replace([np.inf, -np.inf], 0)
+            
             # 1. Train & Predict LGBM
-            self.lgbm.fit(X_tr[feature_cols], y_tr)
-            oof_preds[val_idx, 0:3] = self.lgbm.predict_proba(X_va[feature_cols])
+            self.lgbm.fit(X_tr_numeric, y_tr)
+            oof_preds[val_idx, 0:3] = self.lgbm.predict_proba(X_va_numeric)
             
             # 2. Train & Predict XGB
-            self.xgb.fit(X_tr[feature_cols], y_tr)
-            oof_preds[val_idx, 3:6] = self.xgb.predict_proba(X_va[feature_cols])
+            self.xgb.fit(X_tr_numeric, y_tr)
+            oof_preds[val_idx, 3:6] = self.xgb.predict_proba(X_va_numeric)
             
             # 3. Train & Predict LR
-            X_tr_scaled = self.scaler.fit_transform(X_tr[feature_cols])
-            X_va_scaled = self.scaler.transform(X_va[feature_cols])
+            X_tr_scaled = self.scaler.fit_transform(X_tr_numeric)
+            X_va_scaled = self.scaler.transform(X_va_numeric)
             self.lr.fit(X_tr_scaled, y_tr)
             oof_preds[val_idx, 6:9] = self.lr.predict_proba(X_va_scaled)
             
-            # 4. Train & Predict TFT (Mock for now as TFT needs TimeSeriesDataSet)
-            # In real scenario, we'd use predictor.prepare_dataset and predictor.train
-            # oof_preds[val_idx, 9:12] = ...
         
+        # 4. Train TFT once on full dataset (huge speedup vs doing it per-fold)
+        logger.info("Training TFT on full train set...")
+        try:
+            tft_train_ds = self.tft.prepare_dataset(X_train, is_training=True)
+            tft_val_ds   = self.tft.prepare_dataset(X_val, is_training=False)
+            
+            train_dl = tft_train_ds.to_dataloader(train=True, batch_size=config.BATCH_SIZE, num_workers=0)
+            val_dl   = tft_val_ds.to_dataloader(train=False, batch_size=config.BATCH_SIZE, num_workers=0)
+            
+            self.tft.build_model(tft_train_ds)
+            # Fast training for ensemble fitting (5 epochs)
+            self.tft.train(train_dl, val_dl, max_epochs=5)
+            self.tft.training_dataset = tft_train_ds
+            
+            # Predict on X_train to feed into Meta-learner
+            _, p4 = self.tft.predict(train_dl)
+            if len(p4) != len(X_train):
+                padded_p4 = np.zeros((len(X_train), 3))
+                padded_p4[-len(p4):] = p4
+                p4 = padded_p4
+        except Exception as e:
+            logger.warning(f"TFT training failed: {e}. Falling back to zeros.")
+            p4 = np.zeros((len(X_train), 3))
+
         # Step 2: Meta-features (Stacking + Regimes)
         regime_features = ["vol_regime", "trend_regime"]
-        extra_meta = X_train[regime_features].values
-        meta_X = np.hstack([oof_preds, extra_meta])
+        extra_meta = X_train[regime_features].fillna(0).values
+        meta_X = np.hstack([oof_preds, p4, extra_meta])
         
         logger.info("Training meta-learner...")
         self.meta.fit(meta_X, y_train)
         
         # Step 3: Calibrate
         logger.info("Calibrating on validation set...")
-        val_probas = self._get_stacked_probas(X_val)
-        self.temperature = compute_temperature(val_probas, y_val)
+        val_meta_features = self._get_stacked_probas(X_val)
+        final_probs = self.meta.predict_proba(val_meta_features)
+        self.temperature = compute_temperature(final_probs, y_val)
         logger.info(f"Temperature scaling T={self.temperature:.4f} ✓")
 
     def _get_stacked_probas(self, X: pd.DataFrame) -> np.ndarray:
-        feature_cols = [c for c in X.columns if c not in ["DATE", "SYMBOL", "label_3c"]]
-        p1 = self.lgbm.predict_proba(X[feature_cols])
-        p2 = self.xgb.predict_proba(X[feature_cols])
-        X_scaled = self.scaler.transform(X[feature_cols])
+        # Use pinned features from fit()
+        if self.feature_cols_ is None:
+             # Fallback if fit wasn't called (shouldn't happen in pipeline)
+             exclude_cols = ["label_3c", "target", "next_day_return", "DATE", "SYMBOL"]
+             self.feature_cols_ = X.select_dtypes(include=[np.number, bool]).columns.tolist()
+             self.feature_cols_ = [c for c in self.feature_cols_ if c not in exclude_cols]
+        
+        feature_cols = self.feature_cols_
+        X_numeric = X[feature_cols].fillna(0).replace([np.inf, -np.inf], 0)
+
+        p1 = self.lgbm.predict_proba(X_numeric)
+        p2 = self.xgb.predict_proba(X_numeric)
+        X_scaled = self.scaler.transform(X_numeric)
         p3 = self.lr.predict_proba(X_scaled)
-        # Mock p4 (TFT)
-        p4 = np.zeros_like(p1) 
+        # TFT Predict
+        try:
+            tft_ds = self.tft.prepare_dataset(X, is_training=False)
+            tft_dl = tft_ds.to_dataloader(train=False, batch_size=config.BATCH_SIZE, num_workers=0)
+            _, p4 = self.tft.predict(tft_dl)
+            
+            if len(p4) != len(X):
+                padded_p4 = np.zeros((len(X), 3))
+                padded_p4[-len(p4):] = p4
+                p4 = padded_p4
+        except Exception as e:
+            logger.warning(f"TFT prediction failed: {e}. Falling back to zeros.")
+            p4 = np.zeros_like(p1)
         
         regime_features = ["vol_regime", "trend_regime"]
-        extra_meta = X[regime_features].values
+        extra_meta = X[regime_features].fillna(0).values
         return np.hstack([p1, p2, p3, p4, extra_meta])
 
     def predict_proba(self, X: pd.DataFrame) -> pd.DataFrame:
@@ -480,13 +541,11 @@ def compute_temperature(probas: np.ndarray, y_true: pd.Series) -> float:
     from sklearn.metrics import log_loss
     
     def objective(T):
-        # Apply temperature scaling to logits (mock logits from probas)
-        # For simplicity, we assume probas are already somewhat logit-like or 
-        # we work directly on them. Real implementation would use meta.decision_function.
-        T = T[0]
-        scaled_logits = np.log(probas + 1e-9) / T
+        # Handle potential NaNs in input probas
+        safe_probas = np.nan_to_num(probas, nan=1/probas.shape[1])
+        scaled_logits = np.log(safe_probas + 1e-9) / T
         scaled_probas = np.exp(scaled_logits) / np.sum(np.exp(scaled_logits), axis=1, keepdims=True)
-        return log_loss(y_true, scaled_probas)
+        return log_loss(y_true, np.nan_to_num(scaled_probas, nan=1/probas.shape[1]))
     
     res = minimize(objective, [1.0], bounds=[(0.1, 5.0)])
     return res.x[0]
