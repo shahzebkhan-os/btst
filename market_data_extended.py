@@ -47,8 +47,6 @@ TICKERS: Dict[str, str] = {
     "HG=F":     "COPPER",        # Copper Futures — leading economic indicator
     "ALI=F":    "ALUMINIUM",     # Aluminium Futures
     "ZNC=F":    "ZINC",          # Zinc Futures
-    "NI=F":     "NICKEL",        # Nickel Futures
-    "PB=F":     "LEAD",          # Lead Futures
 
     # ── C. Energy ─────────────────────────────────────────────────────────
     "BZ=F":     "BRENT",         # Brent Crude (India imports Brent) — HIGH IMPACT
@@ -108,8 +106,6 @@ TICKERS: Dict[str, str] = {
     # ── H. Volatility Indices ─────────────────────────────────────────────
     "^VIX":     "USVIX",         # CBOE VIX — global fear gauge
     "^VXN":     "VXN",           # Nasdaq Volatility Index
-    "OVX":      "OIL_VIX",       # Oil Volatility Index
-    "GVZ":      "GOLD_VIX",      # Gold Volatility Index
     "^VVIX":    "VVIX",          # VIX of VIX (volatility of volatility)
     "^INDIAVIX":"INDIAVIX",      # India VIX (if not already loaded)
 
@@ -132,41 +128,44 @@ TICKERS: Dict[str, str] = {
 # ─── INDIA MACRO EVENT CALENDAR ───────────────────────────────────────────────
 # Update quarterly. Format: "YYYY-MM-DD": "event_name"
 INDIA_EVENTS: Dict[str, str] = {
-    # RBI MPC meetings
-    "2024-02-08": "RBI_MPC", "2024-04-05": "RBI_MPC", "2024-06-07": "RBI_MPC",
-    "2024-08-08": "RBI_MPC", "2024-10-09": "RBI_MPC", "2024-12-06": "RBI_MPC",
-    "2025-02-07": "RBI_MPC", "2025-04-09": "RBI_MPC", "2025-06-06": "RBI_MPC",
-    "2025-08-07": "RBI_MPC", "2025-10-01": "RBI_MPC", "2025-12-05": "RBI_MPC",
+    # --- RBI MPC ---
+    "2020-03-27": "RBI_MPC", "2020-05-22": "RBI_MPC", "2020-08-06": "RBI_MPC", "2020-10-09": "RBI_MPC", "2020-12-04": "RBI_MPC",
+    "2021-02-05": "RBI_MPC", "2021-04-07": "RBI_MPC", "2021-06-04": "RBI_MPC", "2021-08-06": "RBI_MPC", "2021-10-08": "RBI_MPC", "2021-12-08": "RBI_MPC",
+    "2022-02-10": "RBI_MPC", "2022-04-08": "RBI_MPC", "2022-05-04": "RBI_MPC_UNSCHEDULED", "2022-06-08": "RBI_MPC", "2022-08-05": "RBI_MPC", "2022-09-30": "RBI_MPC", "2022-12-07": "RBI_MPC",
+    "2023-02-08": "RBI_MPC", "2023-04-06": "RBI_MPC", "2023-06-08": "RBI_MPC", "2023-08-10": "RBI_MPC", "2023-10-06": "RBI_MPC", "2023-12-08": "RBI_MPC",
+    "2024-02-08": "RBI_MPC", "2024-04-05": "RBI_MPC", "2024-06-07": "RBI_MPC", "2024-08-08": "RBI_MPC", "2024-10-09": "RBI_MPC", "2024-12-06": "RBI_MPC",
+    "2025-02-07": "RBI_MPC", "2025-04-09": "RBI_MPC", "2025-06-06": "RBI_MPC", "2025-08-07": "RBI_MPC", "2025-10-01": "RBI_MPC", "2025-12-05": "RBI_MPC",
     "2026-02-06": "RBI_MPC", "2026-04-08": "RBI_MPC", "2026-06-05": "RBI_MPC",
-    # Union Budget
-    "2024-02-01": "UNION_BUDGET", "2024-07-23": "UNION_BUDGET_FULL",
+
+    # --- US FOMC ---
+    "2020-01-29": "US_FOMC", "2020-03-03": "US_FOMC", "2020-03-15": "US_FOMC", "2020-04-29": "US_FOMC", "2020-06-10": "US_FOMC", "2020-07-29": "US_FOMC", "2020-09-16": "US_FOMC", "2020-11-05": "US_FOMC", "2020-12-16": "US_FOMC",
+    "2021-01-27": "US_FOMC", "2021-03-17": "US_FOMC", "2021-04-28": "US_FOMC", "2021-06-16": "US_FOMC", "2021-07-28": "US_FOMC", "2021-09-22": "US_FOMC", "2021-11-03": "US_FOMC", "2021-12-15": "US_FOMC",
+    "2022-01-26": "US_FOMC", "2022-03-16": "US_FOMC", "2022-05-04": "US_FOMC", "2022-06-15": "US_FOMC", "2022-07-27": "US_FOMC", "2022-09-21": "US_FOMC", "2022-11-02": "US_FOMC", "2022-12-14": "US_FOMC",
+    "2023-02-01": "US_FOMC", "2023-03-22": "US_FOMC", "2023-05-03": "US_FOMC", "2023-06-14": "US_FOMC", "2023-07-26": "US_FOMC", "2023-09-20": "US_FOMC", "2023-11-01": "US_FOMC", "2023-12-13": "US_FOMC",
+    "2024-01-31": "US_FOMC", "2024-03-20": "US_FOMC", "2024-05-01": "US_FOMC", "2024-06-12": "US_FOMC", "2024-07-31": "US_FOMC", "2024-09-18": "US_FOMC", "2024-11-07": "US_FOMC", "2024-12-18": "US_FOMC",
+    "2025-01-29": "US_FOMC", "2025-03-19": "US_FOMC", "2025-05-07": "US_FOMC", "2025-06-18": "US_FOMC", "2025-07-30": "US_FOMC", "2025-09-17": "US_FOMC", "2025-11-05": "US_FOMC", "2025-12-17": "US_FOMC",
+    "2026-01-28": "US_FOMC", "2026-03-18": "US_FOMC", "2026-04-29": "US_FOMC", "2026-06-17": "US_FOMC", "2026-07-29": "US_FOMC", "2026-09-16": "US_FOMC", "2026-10-28": "US_FOMC", "2026-12-09": "US_FOMC",
+
+    # --- Other Major Events ---
+    "2020-02-01": "UNION_BUDGET", "2021-02-01": "UNION_BUDGET", "2022-02-01": "UNION_BUDGET", "2023-02-01": "UNION_BUDGET",
+    "2024-02-01": "UNION_BUDGET", "2024-06-04": "INDIA_ELECTION_RESULT", "2024-07-23": "UNION_BUDGET_FULL",
     "2025-02-01": "UNION_BUDGET", "2026-02-01": "UNION_BUDGET",
-    # US FOMC meetings
-    "2024-01-31": "US_FOMC", "2024-03-20": "US_FOMC", "2024-05-01": "US_FOMC",
-    "2024-06-12": "US_FOMC", "2024-07-31": "US_FOMC", "2024-09-18": "US_FOMC",
-    "2024-11-07": "US_FOMC", "2024-12-18": "US_FOMC",
-    "2025-01-29": "US_FOMC", "2025-03-19": "US_FOMC", "2025-05-07": "US_FOMC",
-    "2025-06-18": "US_FOMC", "2025-07-30": "US_FOMC", "2025-09-17": "US_FOMC",
-    "2025-11-05": "US_FOMC", "2025-12-17": "US_FOMC",
-    "2026-01-28": "US_FOMC", "2026-03-18": "US_FOMC", "2026-04-29": "US_FOMC",
-    "2026-06-17": "US_FOMC", "2026-07-29": "US_FOMC", "2026-09-16": "US_FOMC",
-    "2026-10-28": "US_FOMC", "2026-12-09": "US_FOMC",
-    # India General Elections / Major Events
-    "2024-06-04": "INDIA_ELECTION_RESULT",
 }
 
-# NSE Monthly expiry: last Tuesday of month (shifted from Thursday in Sept 2025)
-NSE_MONTHLY_EXPIRY = [
-    "2024-01-25","2024-02-29","2024-03-28","2024-04-25","2024-05-30",
-    "2024-06-27","2024-07-25","2024-08-29","2024-09-26","2024-10-31",
-    "2024-11-28","2024-12-26","2025-01-30","2025-02-27","2025-03-27",
-    "2025-04-24","2025-05-29","2025-06-26","2025-07-31","2025-08-28",
-    # September 2025 onwards: Last Tuesday
-    "2025-09-30","2025-10-28","2025-11-25","2025-12-30",
-    "2026-01-27","2026-02-24","2026-03-31","2026-04-28","2026-05-26",
-    "2026-06-30","2026-07-28","2026-08-25","2026-09-29","2026-10-27",
-    "2026-11-24","2026-12-29",
-]
+def generate_monthly_expiries(start="2020-01-01", end="2026-12-31") -> List[str]:
+    """
+    NSE monthly expiry is the last Thursday of the month.
+    """
+    thursdays = pd.date_range(start, end, freq="W-THU")
+    expiries = []
+    for month_end in pd.period_range(start, end, freq="M"):
+        month_thursdays = [t for t in thursdays if t.to_period("M") == month_end]
+        if month_thursdays:
+            expiries.append(month_thursdays[-1].strftime("%Y-%m-%d"))
+    return expiries
+
+# Fully programmatic list
+NSE_MONTHLY_EXPIRY = generate_monthly_expiries()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -304,7 +303,8 @@ class MarketDataExtended:
         # ── Overnight / pre-market signals (shift by 1 = yesterday's close) ──
         # When Indian market opens at 9:15 AM, these are already known
         for col in ["SPX_CLOSE", "NDX_CLOSE", "DJIA_CLOSE", "NIKKEI_CLOSE",
-                    "HANGSENG_CLOSE", "SHANGHAI_CLOSE", "FTSE_CLOSE", "DAX_CLOSE"]:
+                    "HANGSENG_CLOSE", "SHANGHAI_CLOSE", "FTSE_CLOSE", "DAX_CLOSE",
+                    "KOSPI_CLOSE"]:
             if col not in c.columns:
                 continue
             name = col.replace("_CLOSE", "")
@@ -442,7 +442,7 @@ class MarketDataExtended:
         sector_cols = {
             "NIFTY_IT":     "IT",
             "NIFTY_AUTO":   "AUTO",
-            "NIFTY_BANK":   "BANK",
+            "BANKNIFTY":    "BANK",   # ← add this (BANKNIFTY_CLOSE exists in ticker map)
             "NIFTY_METAL":  "METAL",
             "NIFTY_PHARMA": "PHARMA",
             "NIFTY_FMCG":   "FMCG",
@@ -462,7 +462,8 @@ class MarketDataExtended:
         # ── Nifty IT special: IT down + strong USD = sector drag ──────────────
         if "NIFTY_IT_CLOSE" in c.columns and "DXY_CLOSE" in c.columns:
             it_down = (c["NIFTY_IT_CLOSE"].pct_change(5) < -0.02)
-            dxy_up  = (c.get("DXY_1D_RET", pd.Series(0, index=c.index)) > 0.3)
+            dxy_ret = c["DXY_1D_RET"] if "DXY_1D_RET" in c.columns else pd.Series(0.0, index=c.index)
+            dxy_up  = (dxy_ret > 0.3)
             c["IT_DXY_DRAG"] = (it_down & dxy_up).astype(int)
 
         # ── Composite Risk Appetite Score (0-10) ─────────────────────────────
@@ -489,6 +490,26 @@ class MarketDataExtended:
             ) * 10
             c["HIGH_RISK_APPETITE"] = (c["RISK_APPETITE_SCORE"] > 6).astype(int)
             c["LOW_RISK_APPETITE"]  = (c["RISK_APPETITE_SCORE"] < 4).astype(int)
+
+        # Single-asset 1D returns — simple loop for all remaining assets
+        for asset in ["WTI", "NATGAS", "WHEAT", "COTTON", "PLATINUM",
+                      "PALLADIUM", "ALUMINIUM", "ZINC", "NICKEL"]:
+            col = f"{asset}_CLOSE"
+            if col in c.columns:
+                c[f"{asset}_1D_RET"] = c[col].pct_change(1) * 100
+
+        # OIL_VIX and GOLD_VIX 1D returns
+        for vix_asset in ["OIL_VIX", "GOLD_VIX"]:
+            col = f"{vix_asset}_CLOSE"
+            if col in c.columns:
+                c[f"{vix_asset}_1D_RET"] = c[col].pct_change(1) * 100
+
+        # Realised vol proxy for Gold and Oil (replaces GVZ/OVX)
+        for etf, name in [("GOLD_ETF", "GOLD"), ("OIL_ETF", "OIL")]:
+            col = f"{etf}_CLOSE"
+            if col in c.columns:
+                log_ret = np.log(c[col] / c[col].shift(1))
+                c[f"{name}_REALIZED_VOL"] = log_ret.rolling(20).std() * np.sqrt(252) * 100
 
         return c
 
@@ -575,15 +596,24 @@ class MarketDataExtended:
         ext = self.download_all()
         ext_reset = ext.reset_index()  # DATE becomes a column
 
-        merged = fno_df.merge(ext_reset, on="DATE", how="left")
+        # Drop raw close/volume — keep only derived signals (leakage prevention)
+        raw_cols = [c for c in ext_reset.columns
+                    if c.endswith('_CLOSE') or c.endswith('_VOL')]
+        ext_signals = ext_reset.drop(columns=raw_cols)
+
+        merged = fno_df.merge(ext_signals, on="DATE", how="left",
+                              suffixes=('', '_EXT_DROP'))
+        
+        # Kill any duplicate columns from bad merge
+        merged = merged[[c for c in merged.columns if not c.endswith('_EXT_DROP')]]
 
         # Forward-fill extended data (covers weekends, holidays)
-        ext_cols = [c for c in ext_reset.columns if c != "DATE"]
+        ext_cols = [c for c in ext_signals.columns if c != "DATE"]
         merged[ext_cols] = merged[ext_cols].ffill()
 
         logger.info(
             f"Merged extended data: {merged.shape[1]} total columns "
-            f"({len(ext_cols)} extended features)"
+            f"({len(ext_cols)} extended signals)"
         )
         return merged
 
@@ -628,7 +658,7 @@ class MarketDataExtended:
             # Volatility
             "USVIX_1D_CHG","USVIX_ABOVE_20","USVIX_ABOVE_30","USVIX_SPIKE","USVIX_RANK",
             "VIX_SPREAD","DUAL_VIX_ELEVATED",
-            "OIL_VIX_1D_RET","GOLD_VIX_1D_RET",
+            "GOLD_REALIZED_VOL", "OIL_REALIZED_VOL",
             # Crypto
             "BTC_1D_RET","BTC_5D_RET","BTC_RISK_ON","BTC_RISK_OFF",
             # EM flows

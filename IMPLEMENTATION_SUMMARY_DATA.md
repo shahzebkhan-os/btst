@@ -90,7 +90,7 @@ python3 data_downloader.py --all
 python data_downloader.py --bhavcopy --vix --fii-dii
 
 # Custom date range
-python data_downloader.py --all --start-date 2022-01-01 --end-date 2024-12-31
+python3 data_downloader.py --all --start-date 2024-01-01 --end-date 2026-03-19
 
 # Force refresh
 python data_downloader.py --all --force-refresh
@@ -234,7 +234,7 @@ crontab -e
 ### Manual Daily Update
 ```bash
 # Download last week's data
-python data_downloader.py --all --start-date $(date -d '7 days ago' +%Y-%m-%d)
+python3 data_downloader.py --all --start-date $(date -d '7 days ago' +%Y-%m-%d)
 ```
 
 ## Documentation Structure

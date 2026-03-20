@@ -49,6 +49,18 @@ W_MID    = 20
 W_LONG   = 60
 W_YEARLY = 252
 
+# These columns must NEVER enter the feature matrix X — they cause look-ahead leakage
+ABSOLUTE_EXCLUDE = {
+    # Future outcomes — leakage
+    "outcome_1h", "outcome_eod", "outcome_next",
+    "pick_ltp_1h", "pick_ltp_eod",
+    "pick_pnl_pct_1h", "pick_pnl_pct_eod", "pick_pnl_pct_next",
+    "trade_result", "label", "label_3c", 
+    # Metadata
+    "symbol", "snapshot_time", "expiry_date", "data_source",
+    "DATE", "SYMBOL", "EXPIRY_DT", "INSTRUMENT", "OPTION_TYP", "TIMESTAMP", "NEAR_EXPIRY"
+}
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 class FeatureEngineer:
@@ -87,9 +99,9 @@ class FeatureEngineer:
         # Drop rows with insufficient history (first 60 rows)
         df = df.iloc[W_LONG:].reset_index(drop=True)
 
-        feature_cols = [c for c in df.columns if c not in
-                        ["DATE", "SYMBOL", "EXPIRY_DT", "INSTRUMENT",
-                         "OPTION_TYP", "TIMESTAMP", "NEAR_EXPIRY"]]
+        # Define feature columns by excluding blacklisted targets and metadata
+        feature_cols = [c for c in df.columns if c not in ABSOLUTE_EXCLUDE and 
+                        not any(black in c.lower() for black in ["outcome", "pick_pnl", "trade_result", "label"])]
 
         # Final cleanup: handle inf and NaN
         df = df.replace([np.inf, -np.inf], np.nan)
@@ -806,17 +818,17 @@ class FeatureEngineer:
         """
         c = df[CLOSE_COL]
 
-        df["next_day_return"]    = c.shift(-1) / c - 1          # float
-        df["next_day_return_pct"] = df["next_day_return"] * 100
-
-        # Classification: 1 = UP (>+0.5%), -1 = DOWN (<-0.5%), 0 = FLAT
-        df["label"] = 0
-        df.loc[df["next_day_return_pct"] >  0.5, "label"] =  1
-        df.loc[df["next_day_return_pct"] < -0.5, "label"] = -1
-
-        # 3-class encoded for softmax: 0=DOWN, 1=FLAT, 2=UP
-        df["label_3c"] = df["label"] + 1
-        df["target"] = df["label_3c"]
+        # Use user-recommended logic (Option B: Next-day spot direction)
+        # outcome_next is next day close, spot_price is current close
+        df["next_spot_ret"] = (c.shift(-1) - c) / c * 100
+        
+        # Classification: 2=UP (>+0.5%), 0=DOWN (<-0.5%), 1=FLAT
+        df["target"] = np.where(df["next_spot_ret"] > 0.5, 2,
+                       np.where(df["next_spot_ret"] < -0.5, 0, 1))
+        
+        # Keep legacy names for a moment if needed, but ensure they are excluded
+        df["next_day_return_pct"] = df["next_spot_ret"]
+        df["label_3c"] = df["target"]
 
         return df
 
@@ -850,22 +862,35 @@ class FeatureEngineer:
 
     def get_feature_names(self, df: pd.DataFrame) -> list:
         """Return list of all feature column names (excludes metadata and target)."""
-        skip = {
+        # User defined absolute exclusion list for leakage prevention
+        ABSOLUTE_EXCLUDE = {
+            # Future outcomes — leakage
+            "outcome_1h", "outcome_eod", "outcome_next",
+            "pick_ltp_1h", "pick_ltp_eod",
+            "pick_pnl_pct_1h", "pick_pnl_pct_eod", "pick_pnl_pct_next",
+            "trade_result", "next_spot_ret",
+            
+            # Legacy and target columns
+            "next_day_return", "next_day_return_pct", "label", "label_3c", "target",
+            
+            # Metadata
             "DATE", "SYMBOL", "EXPIRY_DT", "INSTRUMENT", "OPTION_TYP",
-            "TIMESTAMP", "NEAR_EXPIRY", "OPEN", "HIGH", "LOW", "CLOSE",
-            "SETTLE_PR", "CONTRACTS", "VAL_INLAKH", "OPEN_INT", "CHG_IN_OI",
-            "STRIKE_PR", "DTE", "next_day_return", "next_day_return_pct",
-            "label", "label_3c", "regime_composite", # categorical
-            "CE_OI", "PE_OI", "TOTAL_CE_OI", "TOTAL_PE_OI", # raw input cols
+            "TIMESTAMP", "NEAR_EXPIRY", "symbol", "snapshot_time", "expiry_date", "data_source",
+            
+            # Raw inputs
+            "OPEN", "HIGH", "LOW", "CLOSE", "SETTLE_PR", "CONTRACTS", "VAL_INLAKH", 
+            "OPEN_INT", "CHG_IN_OI", "STRIKE_PR", "DTE", "regime_composite",
+            "CE_OI", "PE_OI", "TOTAL_CE_OI", "TOTAL_PE_OI",
         }
+        
         # Also skip raw macro columns
         macro_raw = [c for c in df.columns if any(
             c.startswith(p) for p in
             ["NIFTY_", "BANKNIFTY_", "SPX_", "NDX_", "USDINR_",
              "GOLD_", "CRUDE_", "MIDCAP_", "VIX_", "BRENT_", "DXY_"]
         ) and any(c.endswith(suffix) for suffix in ["_CLOSE", "_VOL", "_OPEN", "_HIGH", "_LOW"])]
-        skip.update(macro_raw)
-        return [c for c in df.columns if c not in skip]
+        
+        return [c for c in df.columns if c not in ABSOLUTE_EXCLUDE and c not in macro_raw]
 
 
 # ─────────────────────────────────────────────────────────────────────────────

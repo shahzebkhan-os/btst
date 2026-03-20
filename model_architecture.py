@@ -425,8 +425,8 @@ class EnsemblePredictor:
         cpu_count = mp.cpu_count()
         is_apple_silicon = platform.system() == "Darwin" and platform.processor() == "arm"
 
-        # For M1, leave cores for GPU; otherwise use all cores
-        n_jobs = max(1, cpu_count - 2) if is_apple_silicon else -1
+        # For M1, LightGBM/XGBoost OpenMP threads often cause segmentation faults. Force n_jobs=1.
+        n_jobs = 1 if is_apple_silicon else -1
 
         self.lgbm = lgb.LGBMClassifier(
             n_estimators=500, learning_rate=0.05, max_depth=6,
@@ -454,24 +454,40 @@ class EnsemblePredictor:
         Train ensemble using out-of-fold predictions.
         """
         from sklearn.model_selection import TimeSeriesSplit
-        tscv = TimeSeriesSplit(n_splits=5)
+        tscv = TimeSeriesSplit(n_splits=5, max_train_size=252)
         
         logger.info("Starting OOF generation for base models...")
         
+        # Auto-detect numeric feature columns (LGBM/XGB/LR only work on numbers)
         # Auto-detect numeric feature columns (LGBM/XGB/LR only work on numbers)
         exclude_cols = ["label_3c", "target", "next_day_return", "DATE", "SYMBOL"]
         feature_cols_raw  = X_train.select_dtypes(include=[np.number, bool]).columns.tolist()
         self.feature_cols_ = [c for c in feature_cols_raw if c not in exclude_cols]
         feature_cols = self.feature_cols_
         
+        # Detect number of classes and normalize labels to [0, num_classes-1]
+        from sklearn.preprocessing import LabelEncoder
+        self.le_ = LabelEncoder()
+        y_train_encoded = self.le_.fit_transform(y_train)
+        num_classes = len(self.le_.classes_)
+        logger.info(f"Detected {num_classes} target classes: {self.le_.classes_}. Normalizing labels.")
+        
+        # Re-configure models for the specific number of classes found
+        if num_classes > 2:
+            self.lgbm.set_params(num_class=num_classes, objective="multiclass")
+            self.xgb.set_params(num_class=num_classes, objective="multi:softprob")
+        else:
+            self.lgbm.set_params(objective="binary")
+            self.xgb.set_params(objective="binary:logistic")
+
         # OOF Predictions Container (LGBM, XGB, LR)
-        oof_preds = np.zeros((len(X_train), 3 * 3)) # 3 classes * 3 models
+        oof_preds = np.zeros((len(X_train), num_classes * 3)) # num_classes * 3 models
 
         for fold, (train_idx, val_idx) in enumerate(tqdm(tscv.split(X_train), total=5, desc="Ensemble CV Folds")):
             logger.info(f"Fold {fold+1}/5 processing...")
             
             X_tr, X_va = X_train.iloc[train_idx], X_train.iloc[val_idx]
-            y_tr, y_va = y_train.iloc[train_idx], y_train.iloc[val_idx]
+            y_tr, y_va = y_train_encoded[train_idx], y_train_encoded[val_idx]
             
             # Ensure no NaNs before fitting models that don't handle them naturally (LR)
             X_tr_numeric = X_tr[feature_cols].fillna(0).replace([np.inf, -np.inf], 0)
@@ -479,17 +495,38 @@ class EnsemblePredictor:
             
             # 1. Train & Predict LGBM
             self.lgbm.fit(X_tr_numeric, y_tr)
-            oof_preds[val_idx, 0:3] = self.lgbm.predict_proba(X_va_numeric)
+            probs_lgbm = self.lgbm.predict_proba(X_va_numeric)
+            logger.info(f"DEBUG SHAPES: X_va={X_va_numeric.shape}, y_va={y_va.shape}, probs_lgbm={probs_lgbm.shape}, classes={self.lgbm.classes_}")
+            logger.info(f"DEBUG PROBS SAMPLE: {probs_lgbm[:2] if hasattr(probs_lgbm, '__getitem__') else 'no getitem'}")
+            
+            if probs_lgbm.shape[1] < num_classes:
+                full_probs = np.zeros((len(X_va), num_classes))
+                indices = [int(c) for c in self.lgbm.classes_]
+                full_probs[:, indices] = probs_lgbm
+                probs_lgbm = full_probs
+            oof_preds[val_idx, 0:num_classes] = probs_lgbm
             
             # 2. Train & Predict XGB
             self.xgb.fit(X_tr_numeric, y_tr)
-            oof_preds[val_idx, 3:6] = self.xgb.predict_proba(X_va_numeric)
+            probs_xgb = self.xgb.predict_proba(X_va_numeric)
+            if probs_xgb.shape[1] < num_classes:
+                full_probs = np.zeros((len(X_va), num_classes))
+                indices = [int(c) for c in self.xgb.classes_]
+                full_probs[:, indices] = probs_xgb
+                probs_xgb = full_probs
+            oof_preds[val_idx, num_classes:2*num_classes] = probs_xgb
             
             # 3. Train & Predict LR
             X_tr_scaled = self.scaler.fit_transform(X_tr_numeric)
             X_va_scaled = self.scaler.transform(X_va_numeric)
             self.lr.fit(X_tr_scaled, y_tr)
-            oof_preds[val_idx, 6:9] = self.lr.predict_proba(X_va_scaled)
+            probs_lr = self.lr.predict_proba(X_va_scaled)
+            if probs_lr.shape[1] < num_classes:
+                full_probs = np.zeros((len(X_va), num_classes))
+                indices = [int(c) for c in self.lr.classes_]
+                full_probs[:, indices] = probs_lr
+                probs_lr = full_probs
+            oof_preds[val_idx, 2*num_classes:3*num_classes] = probs_lr
             
         
         # 4. Train TFT once on full dataset (huge speedup vs doing it per-fold)
@@ -510,13 +547,18 @@ class EnsemblePredictor:
             
             # Predict on X_train to feed into Meta-learner
             _, p4 = self.tft.predict(train_dl)
+            if p4.shape[1] < num_classes:
+                padded_p4 = np.zeros((len(p4), num_classes))
+                padded_p4[:, :p4.shape[1]] = p4 # Assuming TFT classes are aligned or simplified
+                p4 = padded_p4
+            
             if len(p4) != len(X_train):
-                padded_p4 = np.zeros((len(X_train), 3))
+                padded_p4 = np.zeros((len(X_train), num_classes))
                 padded_p4[-len(p4):] = p4
                 p4 = padded_p4
         except Exception as e:
             logger.warning(f"TFT training failed: {e}. Falling back to zeros.")
-            p4 = np.zeros((len(X_train), 3))
+            p4 = np.zeros((len(X_train), num_classes))
 
         # Step 2: Meta-features (Stacking + Regimes)
         regime_features = ["vol_regime", "trend_regime"]

@@ -39,13 +39,7 @@ venv.bak/
 .ipynb_checkpoints
 *.ipynb
 
-# Data
-data/
-!data/.gitkeep
 
-# Models
-models/
-!models/.gitkeep
 
 # Output
 output/
@@ -92,3 +86,10 @@ temp/
 *.joblib
 *.h5
 *.hdf5
+*.db
+*.parquet
+data/extended/
+data/bhavcopy/
+data/vix/
+data/fii_dii/
+models/

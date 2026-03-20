@@ -23,6 +23,12 @@ from typing import Optional
 import datetime as dt
 from pathlib import Path
 import sys
+import multiprocessing
+try:
+    multiprocessing.set_start_method("spawn", force=True)
+except RuntimeError:
+    pass
+
 from tqdm import tqdm
 
 # --- Compatibility Patch for pytorch-forecasting metadata bug ---
