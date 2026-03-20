@@ -52,6 +52,13 @@ TRAIN_WINDOW_DAYS   = 504   # 2 years of trading days per fold
 VAL_WINDOW_DAYS     = 63    # 1 quarter per fold
 N_CV_FOLDS          = 5
 
+# ── M1/M2 Mac Optimization ────────────────────────────────────────────────────
+# For M1/M2 Macs with limited unified memory (8GB default), use smaller batch size
+# with gradient accumulation to maintain effective batch size
+M1_BATCH_SIZE           = 32    # Reduced for 8GB unified memory
+M1_GRADIENT_ACCUM_STEPS = 2     # Effective batch size = 32 * 2 = 64
+M1_NUM_WORKERS          = 4     # Optimal for 8-core M1
+
 # ── Risk & Execution ──────────────────────────────────────────────────────────
 CAPITAL            = 1_000_000   # ₹ 10 lakh
 MAX_POSITION_PCT   = 0.20        # max 20% capital per trade

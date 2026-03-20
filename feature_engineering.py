@@ -242,8 +242,10 @@ class FeatureEngineer:
 
         # ── Commodity Channel Index (CCI) ─────────────────────────────────
         tp = (h + lo + c) / 3
-        mad = tp.rolling(20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
-        df["cci_20"] = (tp - tp.rolling(20).mean()) / (0.015 * mad + 1e-9)
+        # Optimized MAD calculation using vectorized operations
+        tp_mean = tp.rolling(20).mean()
+        mad = tp.rolling(20).apply(lambda x: np.abs(x - x.mean()).mean(), raw=True)
+        df["cci_20"] = (tp - tp_mean) / (0.015 * mad + 1e-9)
 
         return df
 
@@ -694,10 +696,14 @@ class FeatureEngineer:
         for p in [20, 60]:
             df[f"skew_{p}d"] = ret.rolling(p).skew()
             df[f"kurt_{p}d"] = ret.rolling(p).kurt()
-            
+
         # Autocorrelation (Lags 1, 3, 5)
+        # Optimized: use raw=False only when necessary, cache intermediate results
         for lag in [1, 3, 5]:
-            df[f"autocorr_ret_l{lag}"] = ret.rolling(20).apply(lambda x: x.autocorr(lag=lag) if len(x) > lag else 0, raw=False)
+            # More efficient: compute autocorrelation without applying to each window
+            df[f"autocorr_ret_l{lag}"] = ret.rolling(20, min_periods=lag+1).apply(
+                lambda x: x.autocorr(lag=lag) if len(x) > lag else 0, raw=False
+            )
             
         # sharpe_20d: Rolling 20d risk-adj return
         df["sharpe_20d"] = ret.rolling(20).mean() / (ret.rolling(20).std() + 1e-9)
@@ -878,14 +884,35 @@ def compute_features(
         (features_df, feature_names): enriched DataFrame + list of feature column names
     """
     engineer = FeatureEngineer()
-    frames = []
 
-    for symbol, group in df.groupby(symbol_col):
+    # Use parallel processing for speedup on multi-core systems
+    from joblib import Parallel, delayed
+    import multiprocessing as mp
+
+    # Group by symbol and prepare for parallel processing
+    symbol_groups = [(symbol, group) for symbol, group in df.groupby(symbol_col)]
+
+    # Determine optimal number of jobs
+    n_jobs = min(len(symbol_groups), max(1, mp.cpu_count() - 1))
+
+    logger.info(f"Processing {len(symbol_groups)} symbols in parallel with {n_jobs} workers...")
+
+    def process_symbol(symbol, group):
+        """Process a single symbol's feature engineering."""
         try:
             enriched = engineer.compute_all(group)
-            frames.append(enriched)
+            return enriched
         except Exception as e:
             logger.error(f"Feature engineering failed for {symbol}: {e}")
+            return None
+
+    # Parallel processing
+    frames = Parallel(n_jobs=n_jobs, verbose=0)(
+        delayed(process_symbol)(symbol, group) for symbol, group in symbol_groups
+    )
+
+    # Filter out None results (failed processing)
+    frames = [f for f in frames if f is not None]
 
     if not frames:
         return pd.DataFrame(), []

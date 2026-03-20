@@ -45,6 +45,68 @@ from feature_engineering import FeatureEngineer
 warnings.filterwarnings("ignore")
 logger = logging.getLogger("ModelArchitecture")
 
+
+def get_optimal_num_workers() -> int:
+    """
+    Determine optimal number of workers for DataLoader based on system.
+
+    For M1/M2 Macs with unified memory architecture:
+    - Use 4 workers (good balance for 8-core M1)
+    - Leave cores for GPU and main training thread
+
+    For other systems:
+    - Use cpu_count - 1 (leave one for main thread)
+    - Capped at 8 to avoid too many processes
+
+    Returns:
+        Number of workers for DataLoader
+    """
+    import multiprocessing as mp
+    import platform
+
+    cpu_count = mp.cpu_count()
+
+    # Check if running on Apple Silicon (M1/M2)
+    is_apple_silicon = platform.system() == "Darwin" and platform.processor() == "arm"
+
+    if is_apple_silicon or torch.backends.mps.is_available():
+        # M1/M2 Macs: use 4 workers (good for 8-core M1)
+        num_workers = min(4, cpu_count - 1)
+        logger.info(f"Detected Apple Silicon: using {num_workers} DataLoader workers")
+    else:
+        # Other systems: use most cores, but cap at 8
+        num_workers = min(max(1, cpu_count - 1), 8)
+        logger.info(f"Using {num_workers} DataLoader workers (CPU count: {cpu_count})")
+
+    return max(1, num_workers)  # Always use at least 1 worker
+
+
+def get_optimal_batch_size() -> int:
+    """
+    Determine optimal batch size based on available memory and system.
+
+    For M1/M2 Macs with 8GB unified memory, use smaller batch size
+    to avoid memory pressure between CPU and GPU.
+
+    Returns:
+        Optimal batch size
+    """
+    import platform
+
+    # Check if running on Apple Silicon (M1/M2)
+    is_apple_silicon = platform.system() == "Darwin" and platform.processor() == "arm"
+
+    if is_apple_silicon or torch.backends.mps.is_available():
+        # M1/M2 Macs: use smaller batch size for unified memory
+        batch_size = config.M1_BATCH_SIZE if hasattr(config, 'M1_BATCH_SIZE') else 32
+        logger.info(f"Detected Apple Silicon: using batch size {batch_size}")
+    else:
+        # Other systems: use default
+        batch_size = config.BATCH_SIZE
+        logger.info(f"Using batch size {batch_size}")
+
+    return batch_size
+
 # ─────────────────────────────────────────────────────────────────────────────
 # FOCAL LOSS IMPLEMENTATION
 # ─────────────────────────────────────────────────────────────────────────────
@@ -215,25 +277,42 @@ class TFTPredictor:
         return self.model
 
     def train(
-        self, 
-        train_dataloader, 
-        val_dataloader, 
+        self,
+        train_dataloader,
+        val_dataloader,
         max_epochs: int = config.MAX_EPOCHS
     ) -> pl.Trainer:
         """Train using PyTorch Lightning."""
         if self.model is None:
             raise ValueError("Build model first.")
 
+        # Detect best accelerator: MPS for M1/M2 Macs, CUDA for NVIDIA GPUs, CPU fallback
+        accelerator = "auto"
+        devices = "auto"
+        if torch.backends.mps.is_available():
+            accelerator = "mps"
+            devices = 1
+            logger.info("Using MPS (Metal Performance Shaders) acceleration for M1/M2 Mac")
+        elif torch.cuda.is_available():
+            accelerator = "cuda"
+            devices = 1
+            logger.info("Using CUDA GPU acceleration")
+        else:
+            accelerator = "cpu"
+            devices = 1
+            logger.info("Using CPU (GPU acceleration not available)")
+
         trainer = pl.Trainer(
             max_epochs=max_epochs,
-            accelerator="auto",
+            accelerator=accelerator,
+            devices=devices,
             gradient_clip_val=config.TFT_GRADIENT_CLIP_VAL,
             callbacks=[
                 EarlyStopping(monitor="val_loss", patience=config.EARLY_STOP_PATIENCE),
                 LearningRateMonitor(logging_interval="step")
             ],
         )
-        
+
         trainer.fit(
             self.model,
             train_dataloaders=train_dataloader,
@@ -309,11 +388,13 @@ def walk_forward_tft(df: pd.DataFrame, n_folds: int = 5):
         predictor = TFTPredictor()
         train_ds = predictor.prepare_dataset(train_df, is_training=True)
         val_ds = predictor.prepare_dataset(val_df, is_training=False)
-        
+
         predictor.build_model(train_ds)
-        
-        train_dl = train_ds.to_dataloader(train=True, batch_size=config.BATCH_SIZE, num_workers=0)
-        val_dl = val_ds.to_dataloader(train=False, batch_size=config.BATCH_SIZE * 4, num_workers=0)
+
+        num_workers = get_optimal_num_workers()
+        batch_size = get_optimal_batch_size()
+        train_dl = train_ds.to_dataloader(train=True, batch_size=batch_size, num_workers=num_workers)
+        val_dl = val_ds.to_dataloader(train=False, batch_size=batch_size * 4, num_workers=num_workers)
         
         predictor.train(train_dl, val_dl, max_epochs=20) # shorter for CV
         
@@ -337,18 +418,28 @@ class EnsemblePredictor:
     def __init__(self):
         # Base Models
         self.tft = TFTPredictor()
+
+        # Use all CPU cores for tree-based models (except M1 where we save cores for GPU)
+        import multiprocessing as mp
+        import platform
+        cpu_count = mp.cpu_count()
+        is_apple_silicon = platform.system() == "Darwin" and platform.processor() == "arm"
+
+        # For M1, leave cores for GPU; otherwise use all cores
+        n_jobs = max(1, cpu_count - 2) if is_apple_silicon else -1
+
         self.lgbm = lgb.LGBMClassifier(
             n_estimators=500, learning_rate=0.05, max_depth=6,
             num_leaves=63, subsample=0.8, colsample_bytree=0.7,
-            class_weight="balanced", random_state=42, n_jobs=1,
+            class_weight="balanced", random_state=42, n_jobs=n_jobs,
             verbose=-1
         )
         self.xgb = xgb.XGBClassifier(
             n_estimators=400, learning_rate=0.05, max_depth=5,
             subsample=0.8, colsample_bytree=0.7, use_label_encoder=False,
-            eval_metric="mlogloss", random_state=42, n_jobs=1
+            eval_metric="mlogloss", random_state=42, n_jobs=n_jobs
         )
-        self.lr = LogisticRegression(C=0.1, max_iter=500, class_weight="balanced")
+        self.lr = LogisticRegression(C=0.1, max_iter=500, class_weight="balanced", n_jobs=n_jobs)
         
         # Meta-learner
         self.meta = LogisticRegression(C=1.0, max_iter=200)
@@ -406,9 +497,11 @@ class EnsemblePredictor:
         try:
             tft_train_ds = self.tft.prepare_dataset(X_train, is_training=True)
             tft_val_ds   = self.tft.prepare_dataset(X_val, is_training=False)
-            
-            train_dl = tft_train_ds.to_dataloader(train=True, batch_size=config.BATCH_SIZE, num_workers=0)
-            val_dl   = tft_val_ds.to_dataloader(train=False, batch_size=config.BATCH_SIZE, num_workers=0)
+
+            num_workers = get_optimal_num_workers()
+            batch_size = get_optimal_batch_size()
+            train_dl = tft_train_ds.to_dataloader(train=True, batch_size=batch_size, num_workers=num_workers)
+            val_dl   = tft_val_ds.to_dataloader(train=False, batch_size=batch_size, num_workers=num_workers)
             
             self.tft.build_model(tft_train_ds)
             # Fast training for ensemble fitting (5 epochs)
@@ -458,7 +551,9 @@ class EnsemblePredictor:
         # TFT Predict
         try:
             tft_ds = self.tft.prepare_dataset(X, is_training=False)
-            tft_dl = tft_ds.to_dataloader(train=False, batch_size=config.BATCH_SIZE, num_workers=0)
+            num_workers = get_optimal_num_workers()
+            batch_size = get_optimal_batch_size()
+            tft_dl = tft_ds.to_dataloader(train=False, batch_size=batch_size, num_workers=num_workers)
             _, p4 = self.tft.predict(tft_dl)
             
             if len(p4) != len(X):
