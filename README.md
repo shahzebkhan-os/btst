@@ -2,6 +2,25 @@
 
 Production-grade Neural Network system for predicting the best F&O instruments to trade near market close (2:30–3:25 PM IST) for maximum next-day return in Indian derivatives markets (NSE F&O).
 
+## 🚀 Quick Start (Testing)
+
+**New to the project? Start here:**
+
+```bash
+# 1. Quick verification (2-3 minutes)
+python test_readiness.py --quick
+
+# 2. Train on 5-day test period (5-10 minutes)
+python train_test_period.py --days 5
+
+# 3. Start dashboard
+./startup.sh
+```
+
+📖 **See [QUICKTEST.md](QUICKTEST.md) for complete quick start guide**
+📖 **See [TESTING.md](TESTING.md) for comprehensive testing documentation**
+📖 **See [PRODUCTION_READINESS.md](PRODUCTION_READINESS.md) for readiness verification**
+
 ## 🎯 Overview
 
 This system combines state-of-the-art machine learning models with rigorous financial engineering to predict optimal F&O trading opportunities:
