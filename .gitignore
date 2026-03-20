@@ -81,15 +81,11 @@ temp/
 .optuna/
 
 # Large files
-*.csv
 *.pkl
 *.joblib
 *.h5
 *.hdf5
 *.db
-*.parquet
-data/extended/
+scanner.db
 data/bhavcopy/
-data/vix/
-data/fii_dii/
 models/
