@@ -190,6 +190,32 @@ class DataCollector:
         if symbols:
             result = result[result["SYMBOL"].isin(symbols)]
 
+        # --- OPTIMIZATION: Filter for Near-Month Future Only ---
+        # F&O bhavcopy contains thousands of option rows per symbol per day.
+        # Downstream features expect a daily time-series.
+        # We pick the nearest-expiry future contract (INSTRUMENT = FUTIDX/FUTSTK or OptnTp = XX)
+        if not result.empty:
+            # Detect futures: OPTION_TYP is often 'XX', 'nan', or empty for futures
+            if "OPTION_TYP" in result.columns:
+                # Handle different formats for future type
+                is_future = result["OPTION_TYP"].astype(str).str.upper().isin(["XX", "NAN", "", "NONE", "-"])
+                result = result[is_future]
+            
+            # Additional instrument filter if available (Old: FUTIDX, New: IDF/STF)
+            if "INSTRUMENT" in result.columns:
+                is_fut_inst = (
+                    result["INSTRUMENT"].str.contains("FUT", na=False) |
+                    result["INSTRUMENT"].isin(["IDF", "STF", "IDX", "STK"])
+                )
+                result = result[is_fut_inst]
+
+            # Pick near-month (min DTE) for each Date and Symbol
+            if "DTE" in result.columns:
+                # Sort and drop duplicates to get near-month
+                result = result.sort_values(["DATE", "SYMBOL", "DTE"])
+                result = result.drop_duplicates(subset=["DATE", "SYMBOL"], keep="first")
+        # -----------------------------------------------------
+
         logger.info(
             f"Loaded bhavcopy: {len(result):,} rows | "
             f"{result['DATE'].nunique()} trading days | "
@@ -197,9 +223,11 @@ class DataCollector:
         )
         return result
 
-    def _clean_bhavcopy(self, df: pd.DataFrame, date: dt.datetime) -> pd.DataFrame:
-        """Standardise column names and dtypes for a single bhavcopy file."""
-        # Normalise column names (NSE changes these occasionally)
+    def _clean_bhavcopy(self, df: pd.DataFrame, target_date: str = None) -> pd.DataFrame:
+        """Standardize column names and types for bhavcopy data."""
+        if df.empty:
+            return df
+
         col_map = {
             # Legacy Format
             "SYMBOL":     "SYMBOL",
@@ -213,6 +241,7 @@ class DataCollector:
             "OPTION_TYP": "OPTION_TYP",
             "EXPIRY_DT":  "EXPIRY_DT",
             # New Format (effective late 2024/2025)
+            "TradDt":     "DATE",
             "TckrSymb":   "SYMBOL",
             "ClsPric":    "CLOSE",
             "OpnPric":    "OPEN",
@@ -226,6 +255,9 @@ class DataCollector:
             "TtlTradgVol": "CONTRACTS",
             "TtlTrfVal":  "VAL_INLAKH",
             "SttlmPric":  "SETTLE_PR",
+            "FinInstrmTp": "INSTRUMENT",
+            "UndrlygPric": "UNDERLYING",
+            # Standard mappings
             "INSTRUMENT": "INSTRUMENT",
             "STRIKE_PR":  "STRIKE_PR",
             "OPTION_TYP": "OPTION_TYP",
@@ -234,30 +266,43 @@ class DataCollector:
             "VAL_INLAKH": "VAL_INLAKH",
             "TIMESTAMP":  "TIMESTAMP",
         }
+
+        # Handle col name whitespace and rename
         df = df.rename(columns={c: col_map.get(c.strip(), c.strip()) for c in df.columns})
 
-        # Add trading date
-        df["DATE"] = pd.to_datetime(date).normalize()
+        # --- DEDUPLICATE COLUMNS ---
+        # If multiple original columns mapped to the same name (e.g. TradDt -> DATE and DATE exists)
+        if df.columns.duplicated().any():
+            # Keep the first occurrence of each column name
+            df = df.loc[:, ~df.columns.duplicated()]
+        # ---------------------------
 
-        # Parse expiry
-        if "EXPIRY_DT" in df.columns:
-            df["EXPIRY_DT"] = pd.to_datetime(df["EXPIRY_DT"], format="%d-%b-%Y",
-                                              errors="coerce")
+        # Add DATE if provided and missing
+        if target_date and "DATE" not in df.columns:
+            df["DATE"] = pd.to_datetime(target_date)
+
+        # Standardize Dates
+        for col in ["DATE", "EXPIRY_DT", "TIMESTAMP"]:
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], errors="coerce")
 
         # Drop rows where no price data
-        df = df.dropna(subset=["CLOSE"])
+        if "CLOSE" in df.columns:
+            df = df.dropna(subset=["CLOSE"])
 
-        # Strict column filtering: Only keep what we mapped + standard metadata
-        keep_cols = list(set(col_map.values())) + ["DATE"]
-        df = df[[c for c in keep_cols if c in df.columns]]
-
-        return df
+        # Keep only required columns to save memory
+        # Use a set to ensure unique columns in the filter list
+        target_cols = set(col_map.values()) | {"DATE", "DTE", "NEAR_EXPIRY"}
+        keep_cols = [c for c in target_cols if c in df.columns]
+        df = df[keep_cols]
 
         # Compute DTE
-        df["DTE"] = (df["EXPIRY_DT"] - df["DATE"]).dt.days.clip(lower=0)
-
-        # Near-expiry flag (weekly)
-        df["NEAR_EXPIRY"] = (df["DTE"] <= 2).astype(int)
+        if "EXPIRY_DT" in df.columns and "DATE" in df.columns:
+            # Ensure both are datetimes for subtraction
+            dte_val = (df["EXPIRY_DT"] - df["DATE"]).dt.days
+            df["DTE"] = dte_val.clip(lower=0)
+            # Near-expiry flag (weekly)
+            df["NEAR_EXPIRY"] = (df["DTE"] <= 2).astype(int)
 
         return df
 
@@ -1101,6 +1146,19 @@ class DataCollector:
         macro_cols = list(set(macro_cols + ext_cols))
         
         df[macro_cols] = df.groupby("SYMBOL")[macro_cols].ffill()
+
+        # ── 10. FINAL DATA SANITIZATION ──
+        # Resolve any _x/_y suffix collisions from multiple merges
+        cols_to_drop = [c for c in df.columns if c.endswith("_y")]
+        if cols_to_drop:
+            logger.info(f"Dropping {len(cols_to_drop)} duplicate columns from merge collisions")
+            df = df.drop(columns=cols_to_drop)
+            # Rename _x to original
+            df.columns = [c.replace("_x", "") for c in df.columns]
+
+        # Final fill for any remaining NaNs (TFT requirement)
+        numeric_cols = df.select_dtypes(include=[np.number]).columns
+        df[numeric_cols] = df.groupby("SYMBOL")[numeric_cols].ffill().fillna(0)
 
         df = df.sort_values(["DATE", "SYMBOL"]).reset_index(drop=True)
 

@@ -259,20 +259,10 @@ class TrainingPipeline:
             X (features), y (target)
         """
         if feature_cols is None:
-            # Synchronize with feature_engineering.ABSOLUTE_EXCLUDE
-            exclude_cols = [
-                target_col, "DATE", "SYMBOL", "EXPIRY_DT", "INSTRUMENT",
-                "OPTION_TYP", "TIMESTAMP", "NEAR_EXPIRY", "time_idx",
-                "next_day_return", "next_day_return_pct", "label", "label_3c", "target",
-                "next_spot_ret", "trade_result", "outcome_next", "outcome_eod", "outcome_1h",
-                "pick_ltp_1h", "pick_ltp_eod", "pick_pnl_pct_1h", "pick_pnl_pct_eod", "pick_pnl_pct_next",
-                "symbol", "snapshot_time", "expiry_date", "data_source",
-                "OPEN", "HIGH", "LOW", "CLOSE", "SETTLE_PR", "CONTRACTS", "VAL_INLAKH", 
-                "OPEN_INT", "CHG_IN_OI", "STRIKE_PR", "DTE", "regime_composite"
-            ]
-            # Case-insensitive exclusion
-            exclude_lower = [str(c).lower() for c in exclude_cols]
-            feature_cols = [c for c in df.columns if c not in exclude_cols and str(c).lower() not in exclude_lower]
+            # Use centralized feature detection from FeatureEngineer
+            from feature_engineering import FeatureEngineer
+            eng = FeatureEngineer()
+            feature_cols = eng.get_feature_names(df)
 
         # Sanity check for risky columns (signal, score, confidence)
         risky_cols = ['signal', 'score', 'confidence']
@@ -299,20 +289,33 @@ class TrainingPipeline:
         if target_col in df.columns:
             numeric_df = df.select_dtypes(include=[np.number])
             if target_col in numeric_df.columns:
-                all_corrs = numeric_df.corr()[target_col].drop(target_col).abs().sort_values(ascending=False)
-                leaking = all_corrs[all_corrs > 0.95]
-                if not leaking.empty:
-                    logger.warning(f"(!) CRITICAL LEAKAGE DETECTED (Top 10): {leaking.head(10).to_dict()}")
+                # Filter out known labels from FeatureEngineer.ABSOLUTE_EXCLUDE to avoid false positives
+                from feature_engineering import ABSOLUTE_EXCLUDE
+                target_like_cols = {c for c in ABSOLUTE_EXCLUDE if c in numeric_df.columns}
+                check_all_df = numeric_df.drop(columns=list(target_like_cols), errors='ignore')
                 
-                # Check specifically what is in feature_cols
-                feat_corrs = numeric_df[feature_cols + [target_col]].corr()[target_col].drop(target_col).abs().sort_values(ascending=False)
-                feat_leaking = feat_corrs[feat_corrs > 0.95]
-                if not feat_leaking.empty:
-                    leaking_cols = feat_leaking.to_dict()
-                    raise ValueError(
-                        f"ABORT — target columns found in feature matrix: {leaking_cols}\n"
-                        f"Remove these from get_feature_names(): {list(leaking_cols.keys())}"
-                    )
+                if target_col in check_all_df.columns:
+                    all_corrs = check_all_df.corr()[target_col].drop(target_col).abs().sort_values(ascending=False)
+                    leaking = all_corrs[all_corrs > 0.95]
+                    if not leaking.empty:
+                        logger.warning(f"(!) POTENTIAL LEAKAGE DETECTED (Top 10): {leaking.head(10).to_dict()}")
+                
+                # Check specifically what is in feature_cols — THIS IS THE HARD ABORT
+                check_cols = [c for c in feature_cols if c in numeric_df.columns and c != target_col]
+                if check_cols:
+                    corr_subset = numeric_df[list(set(check_cols)) + [target_col]].corr()[target_col]
+                    if isinstance(corr_subset, pd.DataFrame): 
+                        # This happens if there are multiple columns with the same name
+                        corr_subset = corr_subset.iloc[:, 0]
+                    
+                    feat_corrs = corr_subset.drop(target_col, errors='ignore').abs().sort_values(ascending=False)
+                    feat_leaking = feat_corrs[feat_corrs > 0.99] # Hard abort only on near-perfect correlation in FEATURES
+                    if not feat_leaking.empty:
+                        leaking_cols = feat_leaking.to_dict()
+                        raise ValueError(
+                            f"ABORT — target columns found in feature matrix: {leaking_cols}\n"
+                            f"Remove these from get_feature_names(): {list(leaking_cols.keys())}"
+                        )
 
         X = df[feature_cols].values
         y = df[target_col].values

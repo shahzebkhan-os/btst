@@ -55,10 +55,17 @@ ABSOLUTE_EXCLUDE = {
     "outcome_1h", "outcome_eod", "outcome_next",
     "pick_ltp_1h", "pick_ltp_eod",
     "pick_pnl_pct_1h", "pick_pnl_pct_eod", "pick_pnl_pct_next",
-    "trade_result", "label", "label_3c", 
+    "trade_result", "next_spot_ret", "next_day_return", "next_day_return_pct",
+    
+    # Target columns
+    "label", "label_3c", "target",
+    
     # Metadata
-    "symbol", "snapshot_time", "expiry_date", "data_source",
-    "DATE", "SYMBOL", "EXPIRY_DT", "INSTRUMENT", "OPTION_TYP", "TIMESTAMP", "NEAR_EXPIRY"
+    "DATE", "SYMBOL", "EXPIRY_DT", "INSTRUMENT", "OPTION_TYP",
+    "TIMESTAMP", "NEAR_EXPIRY", "symbol", "snapshot_time", "expiry_date", "data_source",
+    
+    # Raw indices (prefer derived returns)
+    "NIFTY_CLOSE", "BANKNIFTY_CLOSE", "MIDCAP_CLOSE", "VIX_CLOSE",
 }
 
 
@@ -635,12 +642,12 @@ class FeatureEngineer:
             df["vix_above_25"] = 0
             
         # Composite Regime
-        df["regime_composite"] = "choppy"
+        df["regime_composite"] = 0 # choppy
         if "trend_regime" in df.columns and "vol_regime" in df.columns:
-            df.loc[(df["trend_regime"] == 1) & (df["vol_regime"] == 0), "regime_composite"] = "bull_low_vol"
-            df.loc[(df["trend_regime"] == 1) & (df["vol_regime"] >= 1), "regime_composite"] = "bull_high_vol"
-            df.loc[(df["trend_regime"] == -1) & (df["vol_regime"] == 0), "regime_composite"] = "bear_low_vol"
-            df.loc[(df["trend_regime"] == -1) & (df["vol_regime"] >= 1), "regime_composite"] = "bear_high_vol"
+            df.loc[(df["trend_regime"] == 1) & (df["vol_regime"] == 0), "regime_composite"] = 1 # bull_low_vol
+            df.loc[(df["trend_regime"] == 1) & (df["vol_regime"] >= 1), "regime_composite"] = 2 # bull_high_vol
+            df.loc[(df["trend_regime"] == -1) & (df["vol_regime"] == 0), "regime_composite"] = 3 # bear_low_vol
+            df.loc[(df["trend_regime"] == -1) & (df["vol_regime"] >= 1), "regime_composite"] = 4 # bear_high_vol
             
         # Regime Change
         if "trend_regime" in df.columns:
@@ -862,32 +869,12 @@ class FeatureEngineer:
 
     def get_feature_names(self, df: pd.DataFrame) -> list:
         """Return list of all feature column names (excludes metadata and target)."""
-        # User defined absolute exclusion list for leakage prevention
-        ABSOLUTE_EXCLUDE = {
-            # Future outcomes — leakage
-            "outcome_1h", "outcome_eod", "outcome_next",
-            "pick_ltp_1h", "pick_ltp_eod",
-            "pick_pnl_pct_1h", "pick_pnl_pct_eod", "pick_pnl_pct_next",
-            "trade_result", "next_spot_ret",
-            
-            # Legacy and target columns
-            "next_day_return", "next_day_return_pct", "label", "label_3c", "target",
-            
-            # Metadata
-            "DATE", "SYMBOL", "EXPIRY_DT", "INSTRUMENT", "OPTION_TYP",
-            "TIMESTAMP", "NEAR_EXPIRY", "symbol", "snapshot_time", "expiry_date", "data_source",
-            
-            # Raw inputs
-            "OPEN", "HIGH", "LOW", "CLOSE", "SETTLE_PR", "CONTRACTS", "VAL_INLAKH", 
-            "OPEN_INT", "CHG_IN_OI", "STRIKE_PR", "DTE", "regime_composite",
-            "CE_OI", "PE_OI", "TOTAL_CE_OI", "TOTAL_PE_OI",
-        }
-        
         # Also skip raw macro columns
         macro_raw = [c for c in df.columns if any(
             c.startswith(p) for p in
-            ["NIFTY_", "BANKNIFTY_", "SPX_", "NDX_", "USDINR_",
-             "GOLD_", "CRUDE_", "MIDCAP_", "VIX_", "BRENT_", "DXY_"]
+            ["NIFTY_", "BANKNIFTY_", "SPX_", "NDX_", "USDINR_", "DJIA_",
+             "GOLD_", "CRUDE_", "MIDCAP_", "VIX_", "BRENT_", "DXY_", 
+             "FTSE_", "DAX_", "CAC_", "NIKKE_"] # Exclude raw index Close/Vol
         ) and any(c.endswith(suffix) for suffix in ["_CLOSE", "_VOL", "_OPEN", "_HIGH", "_LOW"])]
         
         return [c for c in df.columns if c not in ABSOLUTE_EXCLUDE and c not in macro_raw]

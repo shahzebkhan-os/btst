@@ -253,7 +253,6 @@ class TFTPredictor:
             dataset = TimeSeriesDataSet.from_dataset(
                 self.training_dataset, 
                 df, 
-                stop_random_sampling=True, 
                 predict=True
             )
             
@@ -460,9 +459,9 @@ class EnsemblePredictor:
         
         # Auto-detect numeric feature columns (LGBM/XGB/LR only work on numbers)
         # Auto-detect numeric feature columns (LGBM/XGB/LR only work on numbers)
-        exclude_cols = ["label_3c", "target", "next_day_return", "DATE", "SYMBOL"]
-        feature_cols_raw  = X_train.select_dtypes(include=[np.number, bool]).columns.tolist()
-        self.feature_cols_ = [c for c in feature_cols_raw if c not in exclude_cols]
+        # Use centralized feature detection from FeatureEngineer
+        eng = FeatureEngineer()
+        self.feature_cols_ = eng.get_feature_names(X_train)
         feature_cols = self.feature_cols_
         
         # Detect number of classes and normalize labels to [0, num_classes-1]
@@ -490,8 +489,9 @@ class EnsemblePredictor:
             y_tr, y_va = y_train_encoded[train_idx], y_train_encoded[val_idx]
             
             # Ensure no NaNs before fitting models that don't handle them naturally (LR)
-            X_tr_numeric = X_tr[feature_cols].fillna(0).replace([np.inf, -np.inf], 0)
-            X_va_numeric = X_va[feature_cols].fillna(0).replace([np.inf, -np.inf], 0)
+            # Filter for numeric types only as TFT categoricals are now strings
+            X_tr_numeric = X_tr[feature_cols].select_dtypes(include=[np.number]).fillna(0).replace([np.inf, -np.inf], 0)
+            X_va_numeric = X_va[feature_cols].select_dtypes(include=[np.number]).fillna(0).replace([np.inf, -np.inf], 0)
             
             # 1. Train & Predict LGBM
             self.lgbm.fit(X_tr_numeric, y_tr)

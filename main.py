@@ -122,14 +122,7 @@ def train_model(
     df_features = pd.concat(df_list, ignore_index=True)
     logger.info(f"Features computed: {len(df_features.columns)} columns")
 
-    # Step 3: Add global market features
-    logger.info("Step 3: Adding global market features...")
-    try:
-        market_data = MarketDataExtended()
-        df_global = market_data.download_all()
-        df_features = df_features.merge(df_global, on="DATE", how="left")
-    except Exception as e:
-        logger.warning(f"Could not fetch global features: {e}")
+    # Step 3: Global market features are already integrated in collector.get_full_dataset()
 
     # Step 4: Train model
     logger.info("Step 4: Training model...")

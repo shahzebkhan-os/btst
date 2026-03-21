@@ -432,20 +432,20 @@ This system uses state-of-the-art machine learning to predict F&O trading opport
 
 ```bash
 # Install dependencies
-pip install -r requirements.txt
+pip3 install -r requirements.txt
 
 # Download historical data (last 2 years)
-python data_downloader.py --all
+python3 data_downloader.py --all
 ```
 
 ### 2. Train the Model
 
 ```bash
 # Basic training with walk-forward validation
-python main.py --mode train
+python3 main.py --mode train
 
 # Training with hyperparameter optimization (recommended)
-python main.py --mode train --optimize
+python3 main.py --mode train --optimize
 ```
 
 **Training Time:**

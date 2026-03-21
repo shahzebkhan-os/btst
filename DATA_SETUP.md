@@ -177,7 +177,7 @@ pip install yfinance
 
 **Info:**
 ```bash
-python data_downloader.py --global-info
+python3 data_downloader.py --global-info
 ```
 
 **Note:** No manual download required! These signals are automatically fetched when you run:

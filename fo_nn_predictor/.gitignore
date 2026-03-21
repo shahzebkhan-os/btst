@@ -1,0 +1,20 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Data files (except structure)
+data/bhavcopy/*.csv
+
+
+# Project specific
+logs/
+output/
+.env
+.ipynb_checkpoints/
+.vscode/
+venv/
+env/
+dist/
+build/
+*.log
